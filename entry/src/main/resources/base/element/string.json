@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "将本机USB设备共享给局域网中的USB/IP客户端"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "把本机USB设备共享给局域网中的USB/IP客户端"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "USBArc"
+    }
+  ]
+}

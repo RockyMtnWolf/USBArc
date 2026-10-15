@@ -8,6 +8,7 @@
 - 首批验证 U 盘、J-Link、ST-Link、USB 转 TTL、USB CDC。
 - usbManager 先行；DDK 后续独立评估，不以占位功能宣称已实现。
 - 手动授权/选择共享；用户可开启接入自动授权请求和自动共享。系统授权不能绕过，拒绝时不共享。
+- 自动共享范围由用户选择全部设备或指定规则；规则支持 VID/PID 与可选真实序列号，支持添加/删除和持久化，手动共享不受规则限制。
 - 参考 MeshArc 原生桌面视觉、任务保持/模拟下载选项、系统托盘、关闭到托盘。
 - 仅本地 Git 版本管理，无 GitHub 远端发布。
 
@@ -45,6 +46,12 @@
 ## 当前环境基线
 
 DevEco Studio 26.0.0.851，SDK API26 26.0.0.105 Release，CLI 1.3.4，OHPM 26.0.0.630。HDC `100.116.69.50:37727` 已连接，设备 `HUAWEI MateBook Pro S`、API26、2in1。不复制 MeshArc 签名凭据，不修改其现有代码。
+
+初期用户没有物理 USB 外设，先完成无外设测试；后续已准备 WCH-Link、NanoDAP-WL-Host、NanoDLA、CH343、TI EV2400、USB ISP、CH347T-EVT、CANable 2.0、Air DAPLink、CP2102、CH340、AGM DAP-Link、MPS EVKT-USBI2C、ST-Link V2/V3、J-Link V9、ESP32-S3 USB CDC/JTAG。
+
+最新 HDC 地址 `192.168.112.143:37727` 已连接。用户报告当前接入 U 盘、CH343、CH340、CP2102、CH347T、ST-Link V2/V3；以实际枚举确认接入位置和设备标识，逐个记录授权、导出、Windows attach/枚举、传输和 detach 证据。U盘不写入已有数据，调试器不烧写。宿主已安装 usbip-win2 驱动，CLI 位于 `C:\Program Files\USBip\usbip.exe`。
+
+用户优先要求修好 UI，再做后端验证：参考 MeshArc 的主页与分组设置，使用 USB 设备卡片、新应用图标和黑白托盘图标；必须进行实际截图视觉 QA，覆盖宽/窄窗口和深/浅色。只有截图通过才能报告 UI 已完成。
 
 ## 资料
 
