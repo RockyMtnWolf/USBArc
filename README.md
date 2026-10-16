@@ -1,6 +1,6 @@
 # USBArc
 
-HarmonyOS PC / 二合一设备上的 USB/IP 图形化共享端。应用使用 usbManager 访问本地 USB 设备，通过 USB/IP 1.1.1 与 Windows 的 usbip-win2 通信。
+HarmonyOS PC / 二合一设备上的 USB/IP 图形化共享端。应用提供 usbManager 与 USB DDK 两种本地设备后端，通过 USB/IP 1.1.1 与 Windows 的 usbip-win2 通信。
 
 ## 当前开发范围
 
@@ -8,8 +8,8 @@ HarmonyOS PC / 二合一设备上的 USB/IP 图形化共享端。应用使用 us
 - 手动授权并选择共享设备；可开启接入自动请求授权及自动共享。
 - 自动共享支持全部设备或 VID/PID、可选序列号规则。系统授权由用户决定，自动模式不会绕过授权弹窗。
 - 提供任务保持、模拟下载模式、系统托盘及关闭到托盘。
-- 应用外观支持跟随系统、明亮、黑暗及本地图片背景；主页展示 wlan0 的全部 IPv4/IPv6，设备插拔自动刷新并保留手动刷新。
-- 设置提供 USB Manager / USB DDK 选择。独立 `ddk-driver/` 工程的真实 Native DDK 调用已经通过构建，主应用 DDK 客户端与 USB/IP 接入仍在开发；当前选择 DDK 会明确拒绝启动，不回退到 usbManager。
+- 应用外观支持跟随系统、明亮、黑暗及本地图片背景；主页优先展示 wlan0 的全部 IPv4/IPv6，无地址时显示真实默认网卡并标注名称。设备插拔自动刷新并保留手动刷新。
+- 设置提供 USB Manager / USB DDK 选择；DDK 驱动扩展与客户端已经并入主应用。选择 DDK 会通过真实驱动绑定、初始化和描述符读取确认设备，不回退到 usbManager。实机传输兼容性仍待验证，当前限制见 [DDK 后端范围](docs/DDK_BACKEND_LIMITATIONS.md)。
 
 自动共享表示设备进入本机导出列表；远端 Windows 仍需执行 attach。默认不强制抢占系统使用中的 USB 接口；强制选项可能中断本地磁盘、串口或其他程序对该设备的使用。
 
@@ -32,7 +32,7 @@ devecocli run --module entry --device <HDC地址>
 
 `build-profile.json5` 为忽略文件；签名私钥、证书配置和密码不进入版本库。不要用示例文件覆盖已经配置好的本地签名。
 
-`ddk-driver/` 是独立构建验证工程；正式 DDK 接入正在并入主应用同包，以使用用户已批准的主应用 ACL Profile，详情见 [DDK 签名准备](docs/DDK_SIGNING.md)。
+正式 DDK 接入采用主应用同包方案，需要签名 Profile 获批 `ohos.permission.ACCESS_DDK_USB`；自动生成普通调试 Profile 不能代替该权限。详情见 [DDK 签名准备](docs/DDK_SIGNING.md)。
 
 ## Windows 连接
 
@@ -50,6 +50,8 @@ usbip.exe attach -r <MateBook地址> -b <列表中的busid>
 首版面向 U 盘、J-Link、ST-Link、USB 转 TTL 和 USB CDC，重点处理控制、批量和中断传输；等时传输暂不支持。usbManager 控制传输没有直接取消 API，其取消语义存在限制。
 
 设备速度通过 usbManager 授权后的文件描述符调用只读 `USBDEVFS_GET_SPEED` 查询；接口或系统不支持时协议返回 `USB_SPEED_UNKNOWN`，不根据 `bcdUSB` 猜测。序列号只在用户授权后通过 USB 字符串描述符读取，权限或设备不提供时留空。两者都仍需在目标设备上做互操作验证。
+
+DDK 模式也仅为真实速率查询临时借用 usbManager，并在读取后关闭该句柄；设备占用和数据传输仍使用 DDK。速率读取失败时不共享该设备，因为 usbip-win2 不接受未知速率。DDK 显示设备实际产品字符串，读取失败则使用清楚的 VID/PID，不显示系统硬件路径。
 
 任务保持和模拟下载都是系统后台任务请求。模拟下载不会下载文件或伪造进度，系统可能因没有真实下载活动而取消该任务；PC 建议优先选择任务保持。任何模式都不保证系统永远不结束进程。
 
