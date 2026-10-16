@@ -14,6 +14,8 @@ import {
 } from '../main/ets/services/DdkDriverRpcContract';
 import {
   activeConfigurationFirst,
+  decodeDdkUsbString,
+  ddkDisplayName,
   findDdkEndpoint,
   makeDdkUsbIpBusId,
   parseDdkConfigurationDescriptor,
@@ -53,6 +55,23 @@ function descriptor(id: string, vendorId: number, productId: number): DdkDeviceD
 
 export default function DdkDriverClientHelpersTest() {
   describe('DdkDriverClientHelpersTest', () => {
+    it('decodes real UTF16 USB product strings and refuses malformed descriptors', 0, () => {
+      expect(decodeDdkUsbString([8, 3, 67, 0, 72, 0, 52, 0])).assertEqual('CH4');
+      expect(decodeDdkUsbString([4, 3, 0x2d, 0x4e])).assertEqual('中');
+      expect(decodeDdkUsbString([8, 3, 67, 0])).assertEqual('');
+      expect(decodeDdkUsbString([3, 3, 67])).assertEqual('');
+      expect(decodeDdkUsbString([4, 2, 67, 0])).assertEqual('');
+      expect(decodeDdkUsbString([4, 3, 256, 0])).assertEqual('');
+    });
+
+    it('uses actual product strings before descriptions and never treats hardware paths as names', 0, () => {
+      const hardwarePath: string = 'USB&BUS_02&DEV_02&PID_7523&VID_1A86&CLASS_00';
+      expect(ddkDisplayName('USB2.0-Serial', hardwarePath, 0x1a86, 0x7523)).assertEqual('USB2.0-Serial');
+      expect(ddkDisplayName('', hardwarePath, 0x1a86, 0x7523)).assertEqual('USB 1A86:7523');
+      expect(ddkDisplayName('', 'USB Hub', 0x1234, 0x0001)).assertEqual('USB Hub');
+      expect(ddkDisplayName('', '', 0x1234, 0x0001)).assertEqual('USB 1234:0001');
+    });
+
     it('requires explicit resource-release confirmation before classifying a stopped extension as clean', 0, () => {
       expect(classifyDdkDriverHealth(0, true, false)).assertEqual('healthy');
       expect(classifyDdkDriverHealth(27400002, false, true)).assertEqual('released');
