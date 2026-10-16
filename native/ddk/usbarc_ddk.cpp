@@ -64,12 +64,13 @@ bool GetUint64String(napi_env env, napi_value value, uint64_t &result)
 
 bool GetNumberArray(napi_env env, napi_value value, std::vector<uint8_t> &result)
 {
+    constexpr uint32_t kMaxTransferBytes = 1024U * 1024U;
     bool isArray = false;
     if (napi_is_array(env, value, &isArray) != napi_ok || !isArray) {
         return false;
     }
     uint32_t length = 0;
-    if (napi_get_array_length(env, value, &length) != napi_ok || length > 8000) {
+    if (napi_get_array_length(env, value, &length) != napi_ok || length > kMaxTransferBytes) {
         return false;
     }
     result.resize(length);
@@ -562,6 +563,7 @@ napi_value ClaimedControlTransfer(napi_env env, napi_callback_info info)
 
 napi_value PipeTransfer(napi_env env, napi_callback_info info)
 {
+    constexpr size_t kMaxTransferBytes = 1024U * 1024U;
     size_t argc = 4;
     napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -571,7 +573,7 @@ napi_value PipeTransfer(napi_env env, napi_callback_info info)
     uint32_t timeout = 0;
     std::vector<uint8_t> data;
     if (argc != 4 || !FindClaim(env, argv[0], token, claim) || !GetUint32(env, argv[1], endpoint) || endpoint > 255 ||
-        !GetNumberArray(env, argv[2], data) || !GetUint32(env, argv[3], timeout) || data.size() > 8000) {
+        !GetNumberArray(env, argv[2], data) || !GetUint32(env, argv[3], timeout) || data.size() > kMaxTransferBytes) {
         return CreateTransferResult(env, USB_DDK_INVALID_PARAMETER, 0, {});
     }
     const size_t capacity = std::max<size_t>(data.size(), 1);

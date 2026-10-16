@@ -1,3 +1,5 @@
+export const MAX_DDK_SHARED_TRANSFER_BYTES: number = 1048576;
+
 export interface DdkDriverWireRequest {
   operation: string;
   deviceId: string;
@@ -9,6 +11,8 @@ export interface DdkDriverWireRequest {
   timeoutMs: number;
   setup: Array<number>;
   data: Array<number>;
+  sharedMemoryTransfer: boolean;
+  sharedMemoryLength: number;
 }
 
 export interface DdkDriverWireReply {
@@ -51,6 +55,55 @@ function readBytes(source: Record<string, Object>, key: string): Array<number> {
   return result;
 }
 
+function readBoolean(source: Record<string, Object>, key: string): boolean {
+  const value: Object | undefined = source[key];
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new Error(`DDK RPC field ${key} must be a boolean`);
+  return value as boolean;
+}
+
+/** Validates the explicit, out-of-line pipe payload contract used by both RPC endpoints. */
+export function validateDdkSharedTransfer(operation: string, sharedMemoryTransfer: boolean,
+  sharedMemoryLength: number, sharedMemorySize: number, inlineDataLength: number): void {
+  if (operation !== 'pipeTransfer' || !sharedMemoryTransfer || inlineDataLength !== 0 ||
+    !Number.isInteger(sharedMemoryLength) || sharedMemoryLength < 0 ||
+    sharedMemoryLength > MAX_DDK_SHARED_TRANSFER_BYTES ||
+    sharedMemorySize !== Math.max(1, sharedMemoryLength)) {
+    throw new Error('DDK shared-memory transfer has invalid operation or bounds');
+  }
+}
+
+/** Validates a pipe result before its bytes are copied into the shared region. */
+export function validateDdkSharedTransferResult(isInput: boolean, capacity: number, actualLength: number,
+  responseData: Array<number>): boolean {
+  if (!Number.isInteger(capacity) || capacity < 0 || capacity > MAX_DDK_SHARED_TRANSFER_BYTES ||
+    !Number.isInteger(actualLength) || actualLength < 0 || actualLength > capacity) return false;
+  for (let index: number = 0; index < responseData.length; index++) {
+    if (!Number.isInteger(responseData[index]) || responseData[index] < 0 || responseData[index] > 255) return false;
+  }
+  return isInput ? responseData.length === actualLength : responseData.length === 0;
+}
+
+/** Ensures mappings are removed and the handle is closed, even when the action fails. */
+export function cleanupDdkAshmem(unmap: () => void, close: () => void, mapped: boolean): void {
+  let cleanupFailure: Error | undefined = undefined;
+  if (mapped) {
+    try {
+      unmap();
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error('Failed to unmap DDK Ashmem');
+    }
+  }
+  try {
+    close();
+  } catch (error) {
+    if (cleanupFailure === undefined) {
+      cleanupFailure = error instanceof Error ? error : new Error('Failed to close DDK Ashmem');
+    }
+  }
+  if (cleanupFailure !== undefined) throw cleanupFailure;
+}
+
 export function parseDdkDriverWireRequest(raw: string): DdkDriverWireRequest {
   const source: Record<string, Object> = JSON.parse(raw) as Record<string, Object>;
   const operation: string = readString(source, 'operation');
@@ -65,7 +118,9 @@ export function parseDdkDriverWireRequest(raw: string): DdkDriverWireRequest {
     endpointAddress: readInteger(source, 'endpointAddress'),
     timeoutMs: readInteger(source, 'timeoutMs'),
     setup: readBytes(source, 'setup'),
-    data: readBytes(source, 'data')
+    data: readBytes(source, 'data'),
+    sharedMemoryTransfer: readBoolean(source, 'sharedMemoryTransfer'),
+    sharedMemoryLength: readInteger(source, 'sharedMemoryLength')
   };
 }
 

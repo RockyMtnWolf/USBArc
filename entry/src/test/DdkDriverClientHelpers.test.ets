@@ -8,9 +8,13 @@ import {
   validateDdkTransferRequest
 } from '../main/ets/services/DdkDriverClient';
 import {
+  cleanupDdkAshmem,
+  MAX_DDK_SHARED_TRANSFER_BYTES,
   DdkDriverWireReply,
   normalizeNativeDdkReply,
-  parseDdkDriverWireRequest
+  parseDdkDriverWireRequest,
+  validateDdkSharedTransfer,
+  validateDdkSharedTransferResult
 } from '../main/ets/services/DdkDriverRpcContract';
 import {
   activeConfigurationFirst,
@@ -146,6 +150,51 @@ export default function DdkDriverClientHelpersTest() {
         invalidRejected = true;
       }
       expect(invalidRejected).assertTrue();
+    });
+
+    it('keeps a 64 KiB IN/OUT URB atomic in shared memory and accepts exact short IN packets', 0, () => {
+      const transferLength: number = 65536;
+      validateDdkSharedTransfer('pipeTransfer', true, transferLength, transferLength, 0);
+      const outValid: boolean = validateDdkSharedTransferResult(false, transferLength, transferLength, []);
+      const shortInput: Array<number> = new Array<number>(32768).fill(0x5a);
+      const shortInputValid: boolean = validateDdkSharedTransferResult(true, transferLength,
+        shortInput.length, shortInput);
+      expect(outValid).assertTrue();
+      expect(shortInputValid).assertTrue();
+      expect(validateDdkSharedTransferResult(true, transferLength, shortInput.length, new Array<number>(transferLength).fill(0))).assertFalse();
+      expect(validateDdkSharedTransferResult(false, transferLength, transferLength, [1])).assertFalse();
+      expect(MAX_DDK_SHARED_TRANSFER_BYTES).assertEqual(1048576);
+    });
+
+    it('rejects missing shared-memory payloads and guarantees unmap/close cleanup on errors', 0, () => {
+      let malformedRejected: boolean = false;
+      try {
+        validateDdkSharedTransfer('pipeTransfer', true, 65536, 65536, 1);
+      } catch (_error) {
+        malformedRejected = true;
+      }
+      expect(malformedRejected).assertTrue();
+      let oversizedRejected: boolean = false;
+      try {
+        validateDdkSharedTransfer('pipeTransfer', true, MAX_DDK_SHARED_TRANSFER_BYTES + 1,
+          MAX_DDK_SHARED_TRANSFER_BYTES + 1, 0);
+      } catch (_error) {
+        oversizedRejected = true;
+      }
+      expect(oversizedRejected).assertTrue();
+
+      const cleanupOrder: Array<string> = [];
+      let cleanupFailed: boolean = false;
+      try {
+        cleanupDdkAshmem((): void => {
+          cleanupOrder.push('unmap');
+          throw new Error('injected unmap failure');
+        }, (): void => { cleanupOrder.push('close'); }, true);
+      } catch (_error) {
+        cleanupFailed = true;
+      }
+      expect(cleanupFailed).assertTrue();
+      expect(cleanupOrder.join(',')).assertEqual('unmap,close');
     });
 
     it('flattens native status-value responses and preserves transfer lengths', 0, () => {

@@ -7,7 +7,8 @@ Configuration descriptors are enumerated by USB descriptor index. The native bri
 The current DDK path has explicit limits:
 
 - ISO transfers, `URB_ZERO_PACKET`, force-claim, and cancellation of a running transfer return `-EOPNOTSUPP`.
-- Pipe transfers through the RPC bridge are limited to 8,000 bytes. Oversized transfers return `-EMSGSIZE`; they are not truncated. Control requests are limited to 1,024 bytes and reject oversized `wLength` before submission.
+- Pipe transfers use one `rpc.Ashmem` region per USB/IP URB and keep the URB atomic; the client/native boundary accepts up to 1 MiB per transfer. Oversized transfers return `-EMSGSIZE`; they are not split or truncated. This shared-memory path has build and helper-test coverage but has not been exercised on hardware.
+- DDK descriptor JSON remains capped at 8,000 bytes, and control transfers remain capped at 1,024 bytes by the current backend contract.
 - Pipe and control calls are synchronous inside the DriverExtension process with finite timeouts. ArkTS callers await the RPC asynchronously. No device throughput or latency claim is made.
 - DDK does not expose a public negotiated-speed API. With the user's approved design, the app uses a temporary USBManager pipe only to query `USBDEVFS_GET_SPEED`, then closes it without claiming an interface or submitting USB transfers. This can require a separate OS USB authorization. Missing/ambiguous devices or an unreadable speed block DDK sharing instead of guessing from `bcdUSB`. Claims and data transfers still use DDK.
 - Product, manufacturer and serial strings are read from the device's actual USB string descriptors, using one of its advertised language IDs. Unreadable optional strings remain empty; system hardware paths are never displayed as product names.

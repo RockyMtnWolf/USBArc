@@ -633,7 +633,7 @@ export class UsbDdkBackend {
       handle.activeConfigurationId, handle.activeAlternates, endpointNumber, direction);
     if (endpoint === undefined) throw new UsbBackendError(`DDK endpoint ${endpointNumber} direction ${direction} is unavailable`, -32);
     if (endpoint.type === 1) throw new UsbBackendError('DDK isochronous transfers are not supported', -95);
-    if (expectedLength > 8000) throw new UsbBackendError('DDK RPC transfers are limited to 8000 bytes', -90);
+    if (expectedLength > 1048576) throw new UsbBackendError('DDK pipe transfers are limited to 1 MiB', -90);
     const claim: string | undefined = handle.claimTokens.get(endpoint.interfaceId);
     if (claim === undefined) throw new UsbBackendError('DDK endpoint interface is not claimed', -19);
     const transferData: Uint8Array = direction === 1 ? new Uint8Array(expectedLength) : data;
