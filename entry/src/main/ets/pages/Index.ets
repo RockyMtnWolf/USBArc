@@ -13,7 +13,7 @@ import { UsbDeviceCard } from '../components/UsbDeviceCard';
 import { MetricItem } from '../components/MetricItem';
 import { sharedUsbArcController } from '../services/UsbArcController';
 import { UsbArcPreferencesData } from '../services/UsbArcPreferences';
-import { NetworkAddressSnapshot, NetworkInterfaceAddress, sharedLocalNetworkAddresses } from '../services/LocalNetworkAddresses';
+import { addressMatchesListener, NetworkAddressSnapshot, NetworkInterfaceAddress, sharedLocalNetworkAddresses } from '../services/LocalNetworkAddresses';
 import { UsbDeviceInfo, UsbIpServerStatus } from '../usb/UsbModels';
 
 type UsbArcTab = 'devices' | 'settings';
@@ -129,33 +129,19 @@ struct Index {
     return `${address.address}:${this.serverStatus.port}`;
   }
 
-  private addressMatchesListener(address: NetworkInterfaceAddress): boolean {
-    if (!this.serverStatus.running || address.isLoopback ||
-      !this.serverStatus.listenerFamilies.includes(address.family)) {
-      return false;
-    }
-    if (address.family === 'IPv4' && !address.serverReachable) return false;
-    if (this.serverStatus.host.length === 0 || this.serverStatus.host === '0.0.0.0' || this.serverStatus.host === '::') {
-      return true;
-    }
-    const configuredHost: string = this.serverStatus.host.split('%')[0];
-    const localAddress: string = address.address.split('%')[0];
-    return configuredHost === localAddress;
-  }
-
   private addressNote(address: NetworkInterfaceAddress): string {
     if (address.isLoopback) return '仅本机';
-    if (this.addressMatchesListener(address)) return '监听中';
+    if (addressMatchesListener(address, this.serverStatus)) return '监听中';
     if (!this.serverStatus.running) return '服务启动后确认';
     return '未被监听';
   }
 
   private async copyNetworkAddress(address: NetworkInterfaceAddress): Promise<void> {
-    const value: string = this.addressMatchesListener(address) ? this.connectionAddress(address) : address.address;
+    const value: string = addressMatchesListener(address, this.serverStatus) ? this.connectionAddress(address) : address.address;
     try {
       const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, value);
       await pasteboard.getSystemPasteboard().setData(data);
-      this.getUIContext().getPromptAction().showToast({ message: this.addressMatchesListener(address) ? '连接端点已复制' : 'IP地址已复制' });
+      this.getUIContext().getPromptAction().showToast({ message: addressMatchesListener(address, this.serverStatus) ? '连接端点已复制' : 'IP地址已复制' });
     } catch (_error) {
       this.getUIContext().getPromptAction().showToast({ message: '复制地址失败。' });
     }
@@ -180,16 +166,16 @@ struct Index {
           }
         }
         .width('100%')
-        Text(this.addressMatchesListener(address) ?
+        Text(addressMatchesListener(address, this.serverStatus) ?
           this.connectionAddress(address) : address.address)
           .fontSize(14)
-          .fontColor(this.addressMatchesListener(address) ? $r('app.color.accent') : $r('sys.color.font_primary'))
+          .fontColor(addressMatchesListener(address, this.serverStatus) ? $r('app.color.accent') : $r('sys.color.font_primary'))
           .wordBreak(WordBreak.BREAK_ALL)
           .width('100%')
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
-      Button(this.addressMatchesListener(address) ? '复制端点' : '复制 IP')
+      Button(addressMatchesListener(address, this.serverStatus) ? '复制端点' : '复制 IP')
         .fontSize(12)
         .padding({ left: 8, right: 8 })
         .onClick((): void => { void this.copyNetworkAddress(address); })
@@ -228,7 +214,8 @@ struct Index {
                 this.NetworkAddressItem(item)
               }
                 .width('100%')
-            }, (item: NetworkInterfaceAddress): string => item.key)
+            }, (item: NetworkInterfaceAddress): string =>
+              `${item.key}|${this.serverStatus.running}|${this.serverStatus.host}|${this.serverStatus.port}|${this.serverStatus.listenerFamilies.join(',')}`)
         }
         .width('100%')
       }
@@ -435,9 +422,6 @@ struct Index {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('sys.color.font_primary'))
-              Text('显示该网卡上的全部 IP 地址。')
-                .fontSize(12)
-                .fontColor($r('sys.color.font_secondary'))
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)

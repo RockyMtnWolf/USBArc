@@ -1,12 +1,43 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
+  addressMatchesListener,
   mergeNetworkAddress,
   NetworkInterfaceAddress,
   normalizeNetworkAddress
 } from '../main/ets/services/LocalNetworkAddresses';
+import { UsbIpServerStatus } from '../main/ets/usb/UsbModels';
 
 export default function LocalNetworkAddressesTest() {
   describe('LocalNetworkAddressesTest', () => {
+    it('updates both listener labels when addresses were enumerated before service startup', 0, () => {
+      const ipv4: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '192.0.2.10', 'wlan0', 24, false, true, true, 'getifaddrs', []) as NetworkInterfaceAddress;
+      const ipv6: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv6', '2001:db8::10', 'wlan0', 64, false, true, true, 'getifaddrs', []) as NetworkInterfaceAddress;
+      const status: UsbIpServerStatus = {
+        running: false, host: '0.0.0.0', port: 3240, clientCount: 0,
+        sharedDeviceIds: [], occupiedDeviceIds: [], listenerFamilies: [], lastError: ''
+      };
+      expect(ipv4.serverReachable).assertFalse();
+      expect(ipv6.serverReachable).assertFalse();
+      expect(addressMatchesListener(ipv4, status)).assertFalse();
+      status.running = true;
+      status.listenerFamilies = ['IPv4', 'IPv6'];
+      expect(addressMatchesListener(ipv4, status)).assertTrue();
+      expect(addressMatchesListener(ipv6, status)).assertTrue();
+      status.host = '192.0.2.10';
+      expect(addressMatchesListener(ipv4, status)).assertTrue();
+      expect(addressMatchesListener(ipv6, status)).assertFalse();
+      status.host = '192.0.2.11';
+      expect(addressMatchesListener(ipv4, status)).assertFalse();
+      status.host = '::';
+      status.listenerFamilies = ['IPv6'];
+      expect(addressMatchesListener(ipv4, status)).assertFalse();
+      expect(addressMatchesListener(ipv6, status)).assertTrue();
+      status.running = false;
+      expect(addressMatchesListener(ipv6, status)).assertFalse();
+    });
+
     it('keeps live IPv4 interfaces separate and marks only active non-loopback IPv4 as listener-supported', 0, () => {
       const wlan: NetworkInterfaceAddress | undefined = normalizeNetworkAddress(
         'IPv4', '192.168.112.143', 'wlan0', 24, false, true, true, 'getifaddrs', ['IPv4']);
