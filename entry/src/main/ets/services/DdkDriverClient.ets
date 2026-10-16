@@ -1,7 +1,12 @@
 import { BusinessError, usbManager } from '@kit.BasicServicesKit';
 import { deviceManager } from '@kit.DriverDevelopmentKit';
 import { rpc } from '@kit.IPCKit';
-import { shouldHideDdkHubRow, UsbHubDeviceDescriptor, usbManagerHubDescriptor } from '../usb/UsbHubClassification';
+import {
+  shouldHideDdkHubRow,
+  shouldHideDdkSystemDescription,
+  UsbHubDeviceDescriptor,
+  usbManagerHubDescriptor
+} from '../usb/UsbHubClassification';
 import {
   cleanupDdkAshmem,
   MAX_DDK_SHARED_TRANSFER_BYTES,
@@ -232,7 +237,8 @@ export class DdkDriverClient {
       deviceManager.queryDevices(deviceManager.BusType.USB).forEach((device: Readonly<deviceManager.Device>): void => {
         const mapped: DdkSystemDeviceInfo | undefined = toSystemDeviceInfo(device);
         if (mapped === undefined) return;
-        if (shouldHideDdkHubRow(mapped.vendorId, mapped.productId, managerDescriptors)) return;
+        if (shouldHideDdkHubRow(mapped.vendorId, mapped.productId, managerDescriptors) ||
+          shouldHideDdkSystemDescription(mapped.description, mapped.vendorId, mapped.productId)) return;
         result.push(mapped);
       });
       return result;
