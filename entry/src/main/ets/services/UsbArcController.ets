@@ -1,5 +1,5 @@
 import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, commonEventManager } from '@kit.BasicServicesKit';
 import { UsbIpServer } from './UsbIpServer';
 import {
   UsbArcPreferences,
@@ -18,24 +18,36 @@ const BACKGROUND_STATE_KEY: string = 'usbArcBackgroundState';
 const ACTION_MESSAGE_KEY: string = 'usbArcActionMessage';
 const TRAY_STATE_KEY: string = 'usbArcTrayRegistered';
 
+export type UsbArcPreferenceField = 'backendMode' | 'host' | 'port' | 'autoRequestPermission' | 'autoShare' |
+  'autoShareScope' | 'maxClients' | 'forceClaim' | 'retainClaimsOnStop' | 'backgroundTaskMode' | 'themeMode' |
+  'tabBarStyle' | 'tabBarImagePath' | 'appBackgroundEnabled' | 'rules';
+
 export class UsbArcController {
   private context?: common.UIAbilityContext;
   private preferences: UsbArcPreferencesData = UsbArcPreferences.copy({
+    backendMode: 'usbManager',
     host: '0.0.0.0', port: 3240, autoRequestPermission: false, autoShare: false,
-    autoShareScope: 'all', maxClients: 4, forceClaim: false, backgroundTaskMode: 'off', rules: []
+    autoShareScope: 'all', maxClients: 4, forceClaim: false, retainClaimsOnStop: false, backgroundTaskMode: 'off',
+    themeMode: 'system', tabBarStyle: 'material', tabBarImagePath: '', appBackgroundEnabled: false, rules: []
   });
   private devices: Array<UsbDeviceInfo> = [];
   private serverStatus: UsbIpServerStatus = {
-    running: false, host: '0.0.0.0', port: 3240, clientCount: 0, sharedDeviceIds: [], lastError: ''
+    running: false, host: '0.0.0.0', port: 3240, clientCount: 0, sharedDeviceIds: [],
+    occupiedDeviceIds: [], listenerFamilies: [], lastError: ''
   };
   private unsubscribe?: () => void;
   private unsubscribeBackground?: () => void;
+  private usbEventSubscriber: commonEventManager.CommonEventSubscriber | undefined = undefined;
+  private usbEventRefreshTimer: number = -1;
+  private usbEventRefreshQueue: Promise<void> = Promise.resolve();
   private initialized: boolean = false;
   private shuttingDown: boolean = false;
   private lifecycleGeneration: number = 0;
   private readonly devicePolicy: UsbArcDevicePolicy = new UsbArcDevicePolicy();
   private sharingIds: Set<string> = new Set<string>();
   private policyQueue: Promise<void> = Promise.resolve();
+  private autoPolicyQueue: Promise<void> = Promise.resolve();
+  private preferencesWriteQueue: Promise<void> = Promise.resolve();
   private readonly backgroundTaskManager: UsbBackgroundTaskManager = sharedUsbBackgroundTaskManager;
 
   async initialize(context: common.UIAbilityContext): Promise<void> {
@@ -57,6 +69,8 @@ export class UsbArcController {
     this.publishBackgroundState();
     UsbIpServer.updateSettings(UsbArcPreferences.toServerSettings(this.preferences));
     this.unsubscribe = UsbIpServer.subscribe((event: UsbIpServerEvent): void => this.handleServerEvent(event));
+    await this.subscribeUsbEvents(generation);
+    if (this.shuttingDown || generation !== this.lifecycleGeneration) return;
     this.initialized = true;
     await this.refresh();
   }
@@ -76,6 +90,8 @@ export class UsbArcController {
       port: this.serverStatus.port,
       clientCount: this.serverStatus.clientCount,
       sharedDeviceIds: this.serverStatus.sharedDeviceIds.slice(),
+      occupiedDeviceIds: this.serverStatus.occupiedDeviceIds.slice(),
+      listenerFamilies: this.serverStatus.listenerFamilies.slice(),
       lastError: this.serverStatus.lastError
     };
   }
@@ -86,7 +102,7 @@ export class UsbArcController {
 
   async refresh(): Promise<void> {
     try {
-      const devices: Array<UsbDeviceInfo> = await UsbIpServer.listDevices();
+      const devices: Array<UsbDeviceInfo> = await UsbIpServer.refreshDevices();
       await this.enqueueSnapshot(devices);
       this.updateServerStatus(UsbIpServer.getStatus());
     } catch (error) {
@@ -105,6 +121,7 @@ export class UsbArcController {
       }
       await UsbIpServer.start();
       this.updateServerStatus(UsbIpServer.getStatus());
+      this.scheduleAutoPolicyForPresentDevices();
       if (this.preferences.backgroundTaskMode !== 'off') {
         await this.backgroundTaskManager.onServerStarted(context);
         this.publishBackgroundState();
@@ -133,23 +150,113 @@ export class UsbArcController {
     }
   }
 
-  async updatePreferences(next: UsbArcPreferencesData): Promise<boolean> {
+  async updatePreferences(next: UsbArcPreferencesData,
+    changedFields?: Array<UsbArcPreferenceField>): Promise<boolean> {
     const context: common.UIAbilityContext | undefined = this.context;
     if (context === undefined) {
       return false;
     }
-    try {
-      this.updateBackendSettings(next);
-      await UsbArcPreferences.save(context, next);
-      this.preferences = UsbArcPreferences.copy(next);
-      this.publishPreferences();
-      await this.runAutoPolicyForPresentDevices();
-      this.setActionMessage('设置已保存。');
-      return true;
-    } catch (error) {
-      this.setActionMessage(`保存设置失败：${this.errorMessage(error as Object)}`);
-      return false;
-    }
+    const fields: Array<UsbArcPreferenceField> = changedFields === undefined ?
+      this.findChangedPreferenceFields(this.preferences, next) : changedFields.slice();
+    if (fields.length === 0) return true;
+    let saved: boolean = false;
+    const operation: Promise<void> = this.preferencesWriteQueue.then(async (): Promise<void> => {
+      const previous: UsbArcPreferencesData = UsbArcPreferences.copy(this.preferences);
+      const merged: UsbArcPreferencesData = this.mergePreferenceFields(previous, next, fields);
+      const backendModeChanged: boolean = merged.backendMode !== previous.backendMode;
+      const autoRequestEnabled: boolean = merged.autoRequestPermission && !previous.autoRequestPermission;
+      try {
+        // Persist only the fields represented by this request. The USB SDK update stays synchronous.
+        // If either operation fails, restore the old persisted/backend configuration.
+        await UsbArcPreferences.save(context, merged);
+        this.updateBackendSettings(merged);
+        this.preferences = UsbArcPreferences.copy(merged);
+        this.publishPreferences();
+        if (autoRequestEnabled) {
+          this.devices.forEach((device: UsbDeviceInfo): void => {
+            if (!device.authorized) this.devicePolicy.resetPermissionAttempt(device.id);
+          });
+        }
+        if (this.hasAutoPolicyChanges(fields)) {
+          this.scheduleAutoPolicyForPresentDevices();
+        }
+        if (backendModeChanged) void this.refresh();
+        saved = true;
+      } catch (error) {
+        try {
+          await UsbArcPreferences.save(context, previous);
+          this.updateBackendSettings(previous);
+        } catch (_rollbackError) {
+          // Keep the primary error visible; backend settings are restored whenever possible.
+        }
+        this.preferences = previous;
+        this.publishPreferences();
+        this.setActionMessage(`保存设置失败：${this.errorMessage(error as Object)}`);
+      }
+    });
+    this.preferencesWriteQueue = operation.catch((): void => {});
+    await operation;
+    return saved;
+  }
+
+  private findChangedPreferenceFields(previous: UsbArcPreferencesData,
+    next: UsbArcPreferencesData): Array<UsbArcPreferenceField> {
+    const fields: Array<UsbArcPreferenceField> = [];
+    if (previous.backendMode !== next.backendMode) fields.push('backendMode');
+    if (previous.host !== next.host) fields.push('host');
+    if (previous.port !== next.port) fields.push('port');
+    if (previous.autoRequestPermission !== next.autoRequestPermission) fields.push('autoRequestPermission');
+    if (previous.autoShare !== next.autoShare) fields.push('autoShare');
+    if (previous.autoShareScope !== next.autoShareScope) fields.push('autoShareScope');
+    if (previous.maxClients !== next.maxClients) fields.push('maxClients');
+    if (previous.forceClaim !== next.forceClaim) fields.push('forceClaim');
+    if (previous.retainClaimsOnStop !== next.retainClaimsOnStop) fields.push('retainClaimsOnStop');
+    if (previous.backgroundTaskMode !== next.backgroundTaskMode) fields.push('backgroundTaskMode');
+    if (previous.themeMode !== next.themeMode) fields.push('themeMode');
+    if (previous.tabBarStyle !== next.tabBarStyle) fields.push('tabBarStyle');
+    if (previous.tabBarImagePath !== next.tabBarImagePath) fields.push('tabBarImagePath');
+    if (previous.appBackgroundEnabled !== next.appBackgroundEnabled) fields.push('appBackgroundEnabled');
+    const rulesChanged: boolean = previous.rules.length !== next.rules.length || previous.rules.some(
+      (item: UsbAutoShareRule, index: number): boolean => {
+        const candidate: UsbAutoShareRule | undefined = next.rules[index];
+        return candidate === undefined || item.id !== candidate.id || item.vendorIdHex !== candidate.vendorIdHex ||
+          item.productIdHex !== candidate.productIdHex || item.serialNumber !== candidate.serialNumber;
+      });
+    if (rulesChanged) fields.push('rules');
+    return fields;
+  }
+
+  private mergePreferenceFields(base: UsbArcPreferencesData, source: UsbArcPreferencesData,
+    fields: Array<UsbArcPreferenceField>): UsbArcPreferencesData {
+    const merged: UsbArcPreferencesData = UsbArcPreferences.copy(base);
+    fields.forEach((field: UsbArcPreferenceField): void => {
+      switch (field) {
+        case 'backendMode': merged.backendMode = source.backendMode; break;
+        case 'host': merged.host = source.host; break;
+        case 'port': merged.port = source.port; break;
+        case 'autoRequestPermission': merged.autoRequestPermission = source.autoRequestPermission; break;
+        case 'autoShare': merged.autoShare = source.autoShare; break;
+        case 'autoShareScope': merged.autoShareScope = source.autoShareScope; break;
+        case 'maxClients': merged.maxClients = source.maxClients; break;
+        case 'forceClaim': merged.forceClaim = source.forceClaim; break;
+        case 'retainClaimsOnStop': merged.retainClaimsOnStop = source.retainClaimsOnStop; break;
+        case 'backgroundTaskMode': merged.backgroundTaskMode = source.backgroundTaskMode; break;
+        case 'themeMode': merged.themeMode = source.themeMode; break;
+        case 'tabBarStyle': merged.tabBarStyle = source.tabBarStyle; break;
+        case 'tabBarImagePath': merged.tabBarImagePath = source.tabBarImagePath; break;
+        case 'appBackgroundEnabled': merged.appBackgroundEnabled = source.appBackgroundEnabled; break;
+        case 'rules': merged.rules = source.rules.map((rule: UsbAutoShareRule): UsbAutoShareRule => ({
+          id: rule.id, vendorIdHex: rule.vendorIdHex, productIdHex: rule.productIdHex, serialNumber: rule.serialNumber
+        })); break;
+      }
+    });
+    return merged;
+  }
+
+  private hasAutoPolicyChanges(fields: Array<UsbArcPreferenceField>): boolean {
+    return fields.some((field: UsbArcPreferenceField): boolean =>
+      field === 'autoRequestPermission' || field === 'autoShare' || field === 'autoShareScope' ||
+      field === 'rules' || field === 'backendMode' || field === 'forceClaim');
   }
 
   async addRule(rule: UsbAutoShareRule): Promise<boolean> {
@@ -167,13 +274,13 @@ export class UsbArcController {
       return false;
     }
     next.rules.push(normalized);
-    return await this.updatePreferences(next);
+    return await this.updatePreferences(next, ['rules']);
   }
 
   async removeRule(ruleId: string): Promise<boolean> {
     const next: UsbArcPreferencesData = UsbArcPreferences.copy(this.preferences);
     next.rules = next.rules.filter((item: UsbAutoShareRule): boolean => item.id !== ruleId);
-    return await this.updatePreferences(next);
+    return await this.updatePreferences(next, ['rules']);
   }
 
   async setBackgroundMode(mode: UsbBackgroundTaskMode): Promise<boolean> {
@@ -185,16 +292,15 @@ export class UsbArcController {
     if (state.ok) {
       const next: UsbArcPreferencesData = UsbArcPreferences.copy(this.preferences);
       next.backgroundTaskMode = mode;
-      try {
-        await UsbArcPreferences.save(context, next);
-        this.preferences = next;
-        this.publishPreferences();
-      } catch (error) {
-        this.setActionMessage(`系统已确认任务，但保存设置失败：${this.errorMessage(error as Object)}`);
+      const saved: boolean = await this.updatePreferences(next, ['backgroundTaskMode']);
+      if (!saved) {
+        this.publishBackgroundState();
+        this.setActionMessage('后台任务已应用，但设置未保存。');
+        return false;
       }
     }
     this.publishBackgroundState();
-    this.setActionMessage(state.message);
+    if (!state.ok) this.setActionMessage(state.message);
     return state.ok;
   }
 
@@ -208,7 +314,7 @@ export class UsbArcController {
       if (this.shuttingDown) {
         return false;
       }
-      this.setActionMessage(granted ? '系统已授权该USB设备。' : '系统拒绝授权；当前接入期间不会重复弹窗。');
+      this.setActionMessage(granted ? '系统已授权该USB设备。' : '尚未获得授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。');
       await this.refresh();
       if (granted) {
         const device: UsbDeviceInfo | undefined = this.devices.find((item: UsbDeviceInfo): boolean => item.id === deviceId);
@@ -294,6 +400,7 @@ export class UsbArcController {
       this.unsubscribeBackground();
       this.unsubscribeBackground = undefined;
     }
+    this.unsubscribeUsbEvents();
     const deviceIds: Array<string> = this.devices.map((device: UsbDeviceInfo): string => device.id);
     for (let index: number = 0; index < deviceIds.length; index++) {
       try {
@@ -324,6 +431,65 @@ export class UsbArcController {
     }
   }
 
+  private async subscribeUsbEvents(generation: number): Promise<void> {
+    const subscribeInfo: commonEventManager.CommonEventSubscribeInfo = {
+      events: [
+        commonEventManager.Support.COMMON_EVENT_USB_DEVICE_ATTACHED,
+        commonEventManager.Support.COMMON_EVENT_USB_DEVICE_DETACHED
+      ]
+    };
+    let subscriber: commonEventManager.CommonEventSubscriber | undefined = undefined;
+    try {
+      subscriber = await commonEventManager.createSubscriber(subscribeInfo);
+      if (this.shuttingDown || generation !== this.lifecycleGeneration) {
+        commonEventManager.unsubscribe(subscriber);
+        return;
+      }
+      await commonEventManager.subscribeToEvent(subscriber, (event: commonEventManager.CommonEventData): void => {
+        if (event.event === commonEventManager.Support.COMMON_EVENT_USB_DEVICE_ATTACHED ||
+          event.event === commonEventManager.Support.COMMON_EVENT_USB_DEVICE_DETACHED) {
+          this.scheduleUsbEventRefresh(generation);
+        }
+      });
+      if (this.shuttingDown || generation !== this.lifecycleGeneration) {
+        commonEventManager.unsubscribe(subscriber);
+        return;
+      }
+      this.usbEventSubscriber = subscriber;
+    } catch (error) {
+      if (subscriber !== undefined) {
+        try { commonEventManager.unsubscribe(subscriber); } catch (_unsubscribeError) { }
+      }
+      this.setActionMessage(`USB设备热插拔监听不可用：${this.errorMessage(error as Object)}`);
+    }
+  }
+
+  private unsubscribeUsbEvents(): void {
+    if (this.usbEventRefreshTimer >= 0) {
+      clearTimeout(this.usbEventRefreshTimer);
+      this.usbEventRefreshTimer = -1;
+    }
+    const subscriber: commonEventManager.CommonEventSubscriber | undefined = this.usbEventSubscriber;
+    this.usbEventSubscriber = undefined;
+    if (subscriber !== undefined) {
+      try { commonEventManager.unsubscribe(subscriber); } catch (_error) { }
+    }
+  }
+
+  private scheduleUsbEventRefresh(generation: number): void {
+    if (this.shuttingDown || generation !== this.lifecycleGeneration) return;
+    if (this.usbEventRefreshTimer >= 0) clearTimeout(this.usbEventRefreshTimer);
+    this.usbEventRefreshTimer = setTimeout((): void => {
+      this.usbEventRefreshTimer = -1;
+      const refreshWork: Promise<void> = this.usbEventRefreshQueue.then(async (): Promise<void> => {
+        if (!this.shuttingDown && generation === this.lifecycleGeneration) await this.refresh();
+      }, async (): Promise<void> => {
+        if (!this.shuttingDown && generation === this.lifecycleGeneration) await this.refresh();
+      });
+      this.usbEventRefreshQueue = refreshWork.catch((): void => {});
+    }, 250);
+  }
+
   private enqueueSnapshot(devices: Array<UsbDeviceInfo>): Promise<void> {
     const snapshot: Array<UsbDeviceInfo> = devices.slice();
     const generation: number = this.lifecycleGeneration;
@@ -347,12 +513,29 @@ export class UsbArcController {
     const arrived: Set<string> = this.devicePolicy.updateAttachment(snapshot);
     this.devices = snapshot;
     this.publishDevices();
-    await this.applyAutoPolicy(snapshot, arrived, false);
+    this.enqueueAutoPolicy(arrived, false);
   }
 
-  private async runAutoPolicyForPresentDevices(): Promise<void> {
+  private scheduleAutoPolicyForPresentDevices(): void {
     const current: Set<string> = this.devicePolicy.currentAttachmentIds();
-    await this.applyAutoPolicy(this.devices, current, true);
+    this.enqueueAutoPolicy(current, true);
+  }
+
+  private enqueueAutoPolicy(eligibleIds: Set<string>, settingsChanged: boolean): void {
+    const allowedIds: Set<string> = new Set<string>(eligibleIds);
+    const generation: number = this.lifecycleGeneration;
+    const next: Promise<void> = this.autoPolicyQueue.then(async (): Promise<void> => {
+      if (!this.shuttingDown && generation === this.lifecycleGeneration) {
+        await this.applyAutoPolicy(this.devices.slice(), allowedIds, settingsChanged);
+      }
+    }, async (): Promise<void> => {
+      if (!this.shuttingDown && generation === this.lifecycleGeneration) {
+        await this.applyAutoPolicy(this.devices.slice(), allowedIds, settingsChanged);
+      }
+    });
+    this.autoPolicyQueue = next.catch((error: Object): void => {
+      this.setActionMessage(`自动设备策略执行失败：${this.errorMessage(error)}`);
+    });
   }
 
   private async applyAutoPolicy(snapshot: Array<UsbDeviceInfo>, eligibleIds: Set<string>,
@@ -373,7 +556,7 @@ export class UsbArcController {
             return;
           }
           if (!granted) {
-            this.setActionMessage(`系统拒绝了${this.deviceTitle(device)}的USB授权；本次接入不再重复请求。`);
+            this.setActionMessage(`尚未获得${this.deviceTitle(device)}的USB授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。`);
             continue;
           }
         } catch (error) {
@@ -393,7 +576,7 @@ export class UsbArcController {
   }
 
   private async maybeAutoShare(device: UsbDeviceInfo): Promise<void> {
-    if (this.shuttingDown || !this.preferences.autoShare || device.shared || !device.authorized || !device.available ||
+    if (this.shuttingDown || !this.serverStatus.running || !this.preferences.autoShare || device.shared || !device.authorized || !device.available ||
       this.sharingIds.has(device.id) ||
       !this.autoShareMatches(device)) {
       return;
@@ -441,12 +624,21 @@ export class UsbArcController {
     const delta: Partial<UsbIpServerSettings> = {};
     if (desired.host !== current.host) delta.host = desired.host;
     if (desired.port !== current.port) delta.port = desired.port;
+    if (desired.backendMode !== current.backendMode) delta.backendMode = desired.backendMode;
     if (desired.autoRequestPermission !== current.autoRequestPermission) {
       delta.autoRequestPermission = desired.autoRequestPermission;
     }
     if (desired.autoShare !== current.autoShare) delta.autoShare = desired.autoShare;
     if (desired.maxClients !== current.maxClients) delta.maxClients = desired.maxClients;
     if (desired.forceClaim !== current.forceClaim) delta.forceClaim = desired.forceClaim;
+    if (desired.retainClaimsOnStop !== current.retainClaimsOnStop) {
+      delta.retainClaimsOnStop = desired.retainClaimsOnStop;
+    }
+    if (delta.host === undefined && delta.port === undefined && delta.backendMode === undefined &&
+      delta.autoRequestPermission === undefined && delta.autoShare === undefined && delta.maxClients === undefined &&
+      delta.forceClaim === undefined && delta.retainClaimsOnStop === undefined) {
+      return;
+    }
     UsbIpServer.updateSettings(delta);
   }
 
@@ -457,6 +649,8 @@ export class UsbArcController {
       port: status.port,
       clientCount: status.clientCount,
       sharedDeviceIds: status.sharedDeviceIds.slice(),
+      occupiedDeviceIds: status.occupiedDeviceIds.slice(),
+      listenerFamilies: status.listenerFamilies.slice(),
       lastError: status.lastError
     };
     AppStorage.setOrCreate(SERVER_STATUS_KEY, this.getServerStatus());

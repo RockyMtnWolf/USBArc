@@ -33,6 +33,10 @@ export class UsbArcDevicePolicy {
     this.permissionAttemptedIds.add(deviceId);
   }
 
+  resetPermissionAttempt(deviceId: string): void {
+    this.permissionAttemptedIds.delete(deviceId);
+  }
+
   shouldRequestPermission(deviceId: string, enabled: boolean, authorized: boolean): boolean {
     if (!enabled || authorized || this.permissionAttemptedIds.has(deviceId)) {
       return false;

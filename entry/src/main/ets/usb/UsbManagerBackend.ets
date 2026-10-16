@@ -1,4 +1,5 @@
 import { BusinessError, usbManager } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import usbipNative from 'libusbip_native.so';
 import {
   UsbConfigurationInfo,
@@ -11,6 +12,11 @@ import {
   UsbTransferResult,
   makeDeviceId
 } from './UsbModels';
+
+const USB_LOG_DOMAIN: number = 0x0000;
+const USB_LOG_TAG: string = 'UsbManagerBackend';
+const USB_PERMISSION_POLL_INTERVAL_MS: number = 200;
+const USB_PERMISSION_POLL_LIMIT: number = 40;
 
 export class UsbBackendError extends Error {
   status: number;
@@ -73,7 +79,10 @@ function mapDevice(device: usbManager.USBDevice): UsbDeviceInfo {
     deviceProtocol: asNumber(device.protocol),
     configurations: configs,
     authorized: usbManager.hasRight(device.name),
+    occupied: false,
     shared: false,
+    imported: false,
+    closing: false,
     available: true
   };
 }
@@ -85,6 +94,7 @@ function businessErrorCode(error: Object): number {
 
 export class UsbManagerBackend {
   private handles: Map<string, UsbDeviceHandle> = new Map<string, UsbDeviceHandle>();
+  private closingIds: Set<string> = new Set<string>();
   private sharedIds: Set<string> = new Set<string>();
   private serialCache: Map<string, string> = new Map<string, string>();
   private serialProbed: Set<string> = new Set<string>();
@@ -97,7 +107,10 @@ export class UsbManagerBackend {
       info.serialNumber = this.serialCache.get(info.id) ?? info.serialNumber;
       info.speed = this.querySpeed(device);
       info.shared = this.sharedIds.has(info.id);
-      info.available = !this.handles.has(info.id);
+      const heldHandle: UsbDeviceHandle | undefined = this.handles.get(info.id);
+      info.occupied = heldHandle !== undefined && heldHandle.claimedInterfaces.length > 0;
+      info.closing = this.closingIds.has(info.id);
+      info.available = true;
       return info;
     });
   }
@@ -110,20 +123,64 @@ export class UsbManagerBackend {
       throw new UsbBackendError('USB device disconnected before permission request', -19);
     }
     try {
-      const granted: boolean = await usbManager.requestRight(device.name);
-      if (granted) {
+      const rightBefore: boolean = usbManager.hasRight(device.name);
+      hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'Permission request begin id=%{public}s name=%{public}s bus=%{public}d address=%{public}d right=%{public}d',
+        deviceId, device.name, device.busNum, device.devAddress, rightBefore ? 1 : 0);
+      const accepted: boolean = rightBefore ? true : await usbManager.requestRight(device.name);
+      let refreshedDevice: usbManager.USBDevice | undefined = this.findDevice(deviceId);
+      let refreshedRight: boolean = refreshedDevice === undefined ? false : usbManager.hasRight(refreshedDevice.name);
+      if (accepted && !refreshedRight) {
+        for (let attempt: number = 0; attempt < USB_PERMISSION_POLL_LIMIT && !refreshedRight; attempt++) {
+          await new Promise<void>((resolve): void => {
+            setTimeout((): void => { resolve(); }, USB_PERMISSION_POLL_INTERVAL_MS);
+          });
+          refreshedDevice = this.findDevice(deviceId);
+          refreshedRight = refreshedDevice === undefined ? false : usbManager.hasRight(refreshedDevice.name);
+        }
+      }
+      hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'Permission request end id=%{public}s granted=%{public}d oldName=%{public}s oldRight=%{public}d newName=%{public}s newRight=%{public}d',
+        deviceId, accepted ? 1 : 0, device.name, usbManager.hasRight(device.name) ? 1 : 0,
+        refreshedDevice === undefined ? '<missing>' : refreshedDevice.name, refreshedRight ? 1 : 0);
+      if (refreshedRight && refreshedDevice !== undefined) {
         this.speedCache.delete(deviceId);
         if (!this.handles.has(deviceId)) {
           this.serialProbed.add(deviceId);
-          const serial: string = await this.readSerialNumber(device);
+          const serial: string = await this.readSerialNumber(refreshedDevice);
           if (serial.length > 0) this.serialCache.set(deviceId, serial);
         }
-        this.querySpeed(device);
+        const afterSerialDevice: usbManager.USBDevice | undefined = this.findDevice(deviceId);
+        const rightAfterSerial: boolean = afterSerialDevice === undefined ? false : usbManager.hasRight(afterSerialDevice.name);
+        hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'Permission metadata serial phase id=%{public}s name=%{public}s right=%{public}d',
+          deviceId, afterSerialDevice === undefined ? '<missing>' : afterSerialDevice.name, rightAfterSerial ? 1 : 0);
+        this.querySpeed(refreshedDevice);
+        const afterSpeedDevice: usbManager.USBDevice | undefined = this.findDevice(deviceId);
+        const rightAfterSpeed: boolean = afterSpeedDevice === undefined ? false : usbManager.hasRight(afterSpeedDevice.name);
+        hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'Permission metadata speed phase id=%{public}s name=%{public}s right=%{public}d',
+          deviceId, afterSpeedDevice === undefined ? '<missing>' : afterSpeedDevice.name, rightAfterSpeed ? 1 : 0);
+        if (rightAfterSerial && rightAfterSpeed && afterSpeedDevice !== undefined) return true;
+        if (accepted) {
+          throw new UsbBackendError(
+            '系统已收到 USB 授权请求，但读取设备信息后访问权未确认；请刷新设备列表。', -13);
+        }
+        return false;
       }
-      return granted;
+      if (accepted) {
+        throw new UsbBackendError(
+          '系统已收到 USB 授权请求，但尚未确认设备访问权；请完成系统弹窗后刷新设备列表。', -13);
+      }
+      return false;
     } catch (error) {
+      if (error instanceof UsbBackendError) throw error;
       throw new UsbBackendError(`USB permission request failed (${businessErrorCode(error as Object)})`, -13);
     }
+  }
+
+  private findDevice(deviceId: string): usbManager.USBDevice | undefined {
+    return usbManager.getDevices().find((item: usbManager.USBDevice): boolean => makeDeviceId(item) === deviceId);
   }
 
   addShared(deviceId: string): void {
@@ -146,6 +203,26 @@ export class UsbManagerBackend {
 
   isShared(deviceId: string): boolean {
     return this.sharedIds.has(deviceId);
+  }
+
+  getSharedDeviceIds(): Array<string> {
+    return Array.from(this.sharedIds);
+  }
+
+  markDeviceClosing(deviceId: string): void {
+    this.closingIds.add(deviceId);
+  }
+
+  clearDeviceClosing(deviceId: string): void {
+    this.closingIds.delete(deviceId);
+  }
+
+  hasClosingDevices(): boolean {
+    return this.closingIds.size > 0;
+  }
+
+  isDeviceClosing(deviceId: string): boolean {
+    return this.closingIds.has(deviceId);
   }
 
   pruneMissingDevices(): Array<string> {
@@ -174,7 +251,12 @@ export class UsbManagerBackend {
     const devices: Array<usbManager.USBDevice> = usbManager.getDevices();
     for (let index: number = 0; index < devices.length; index++) {
       const device: usbManager.USBDevice = devices[index];
-      if (!usbManager.hasRight(device.name)) continue;
+      if (!usbManager.hasRight(device.name)) {
+        hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'Metadata refresh sees no USB right id=%{public}s name=%{public}s bus=%{public}d address=%{public}d',
+          makeDeviceId(device), device.name, device.busNum, device.devAddress);
+        continue;
+      }
       const id: string = makeDeviceId(device);
       if (this.handles.has(id)) continue;
       if (this.serialProbed.has(id)) continue;
@@ -195,8 +277,8 @@ export class UsbManagerBackend {
     if (!this.sharedIds.has(deviceId)) {
       throw new UsbBackendError('Device is not shared', -19);
     }
-    if (this.handles.has(deviceId)) {
-      throw new UsbBackendError('Device already imported by another client', -16);
+    if (this.closingIds.has(deviceId)) {
+      throw new UsbBackendError('Previous USB transfer is still draining; this device cannot be reused yet', -16);
     }
     const device: usbManager.USBDevice | undefined = usbManager.getDevices().find(
       (item: usbManager.USBDevice): boolean => makeDeviceId(item) === deviceId
@@ -205,7 +287,12 @@ export class UsbManagerBackend {
       throw new UsbBackendError('USB device disconnected', -19);
     }
     if (!usbManager.hasRight(device.name)) {
+      this.closeDevice(deviceId);
       throw new UsbBackendError('USB access permission is required', -13);
+    }
+    const retainedHandle: UsbDeviceHandle | undefined = this.handles.get(deviceId);
+    if (retainedHandle !== undefined) {
+      return retainedHandle;
     }
     const pipe: usbManager.USBDevicePipe = usbManager.connectDevice(device);
     if (pipe === undefined) {
@@ -254,6 +341,7 @@ export class UsbManagerBackend {
   }
 
   closeDevice(deviceId: string): void {
+    if (this.closingIds.has(deviceId)) return;
     const handle: UsbDeviceHandle | undefined = this.handles.get(deviceId);
     if (handle !== undefined) {
       this.handles.delete(deviceId);
@@ -264,6 +352,11 @@ export class UsbManagerBackend {
   closeAll(): void {
     const ids: Array<string> = Array.from(this.handles.keys());
     ids.forEach((id: string) => this.closeDevice(id));
+  }
+
+  clearSharedAndCloseAll(): void {
+    this.closeAll();
+    this.sharedIds.clear();
   }
 
   private releaseHandle(handle: UsbDeviceHandle): void {

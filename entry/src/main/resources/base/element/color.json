@@ -27,6 +27,18 @@
     {
       "name": "nav_inactive",
       "value": "#657080"
+    },
+    {
+      "name": "tab_bar_light",
+      "value": "#FFF7F9FC"
+    },
+    {
+      "name": "tab_bar_dark",
+      "value": "#FF1B222C"
+    },
+    {
+      "name": "app_background_tint",
+      "value": "#88F3F5F8"
     }
   ]
 }

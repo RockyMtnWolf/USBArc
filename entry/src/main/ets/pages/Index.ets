@@ -1,111 +1,342 @@
-import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
+import { SymbolGlyphModifier } from '@kit.ArkUI';
+import {
+  DividerMode,
+  HdsTabs,
+  HdsTabsAttribute,
+  HdsTabsController,
+  hdsMaterial
+} from '@kit.UIDesignKit';
 import { UsbArcSettings } from '../components/UsbArcSettings';
 import { UsbDeviceCard } from '../components/UsbDeviceCard';
-import { UsbArcLifecycle } from '../services/UsbArcLifecycle';
+import { MetricItem } from '../components/MetricItem';
 import { sharedUsbArcController } from '../services/UsbArcController';
+import { UsbArcPreferencesData } from '../services/UsbArcPreferences';
+import { NetworkAddressSnapshot, NetworkInterfaceAddress, sharedLocalNetworkAddresses } from '../services/LocalNetworkAddresses';
 import { UsbDeviceInfo, UsbIpServerStatus } from '../usb/UsbModels';
 
 type UsbArcTab = 'devices' | 'settings';
+interface NetworkAddressGroupOptions {
+  family: 'IPv4' | 'IPv6';
+  title: string;
+}
+const IPV4_NETWORK_GROUP_OPTIONS: NetworkAddressGroupOptions = { family: 'IPv4', title: 'IPv4 地址' };
+const IPV6_NETWORK_GROUP_OPTIONS: NetworkAddressGroupOptions = { family: 'IPv6', title: 'IPv6 地址' };
 
 @Entry
 @Component
 struct Index {
+  @StorageLink('usbArcPreferences') private preferences: UsbArcPreferencesData = {
+    backendMode: 'usbManager',
+    host: '0.0.0.0', port: 3240, autoRequestPermission: false, autoShare: false,
+    autoShareScope: 'all', maxClients: 4, forceClaim: false, retainClaimsOnStop: false, backgroundTaskMode: 'off',
+    themeMode: 'system', tabBarStyle: 'material', tabBarImagePath: '', appBackgroundEnabled: false, rules: []
+  };
   @StorageLink('usbArcDevices') private devices: Array<UsbDeviceInfo> = [];
   @StorageLink('usbArcServerStatus') private serverStatus: UsbIpServerStatus = {
-    running: false, host: '0.0.0.0', port: 3240, clientCount: 0, sharedDeviceIds: [], lastError: ''
+    running: false, host: '0.0.0.0', port: 3240, clientCount: 0,
+    sharedDeviceIds: [], occupiedDeviceIds: [], listenerFamilies: [], lastError: ''
   };
   @StorageLink('usbArcActionMessage') private actionMessage: string = '';
   @State private activeTab: UsbArcTab = 'devices';
-  @State private busy: boolean = false;
+  @State private serverActionPending: boolean = false;
+  @State private startNoticeOpen: boolean = false;
+  @State private refreshingDevices: boolean = false;
+  @State private pendingDeviceIds: Array<string> = [];
   @State private wideLayout: boolean = true;
   @State private deviceColumns: number = 2;
+  @State private layoutWidth: number = 0;
+  @State private networkAddresses: Array<NetworkInterfaceAddress> = [];
+  @State private networkRefreshing: boolean = false;
+  @State private networkEnumerationWarning: string = '';
+  private tabsController: HdsTabsController = new HdsTabsController();
+  private unsubscribeNetworkAddresses: (() => void) | undefined = undefined;
 
   aboutToAppear(): void {
     void sharedUsbArcController.refresh();
+    this.unsubscribeNetworkAddresses = sharedLocalNetworkAddresses.subscribe((snapshot: NetworkAddressSnapshot): void => {
+      this.applyNetworkSnapshot(snapshot);
+    });
+    void this.refreshNetworkAddresses();
+  }
+
+  aboutToDisappear(): void {
+    if (this.unsubscribeNetworkAddresses !== undefined) {
+      this.unsubscribeNetworkAddresses();
+      this.unsubscribeNetworkAddresses = undefined;
+    }
+  }
+
+  private async refreshNetworkAddresses(): Promise<void> {
+    if (this.networkRefreshing) {
+      return;
+    }
+    this.networkRefreshing = true;
+    try {
+      const snapshot: NetworkAddressSnapshot = await sharedLocalNetworkAddresses.listAddresses();
+      this.applyNetworkSnapshot(snapshot);
+    } catch (_error) {
+      this.networkEnumerationWarning = '网络接口信息读取失败，地址列表可能不完整。';
+      this.getUIContext().getPromptAction().showToast({ message: '读取本机网络地址失败。' });
+    } finally {
+      this.networkRefreshing = false;
+    }
+  }
+
+  private actionErrorMessage(fallback: string): string {
+    const message: string = this.actionMessage;
+    if (message.indexOf('失败') >= 0 || message.indexOf('未完成') >= 0 ||
+      message.indexOf('未获得') >= 0 || message.indexOf('不可用') >= 0 ||
+      message.indexOf('无法') >= 0 || message.indexOf('拒绝') >= 0) {
+      return message;
+    }
+    return fallback;
+  }
+
+  private addPendingDevice(deviceId: string): boolean {
+    if (this.pendingDeviceIds.includes(deviceId)) return false;
+    this.pendingDeviceIds = this.pendingDeviceIds.concat([deviceId]);
+    return true;
+  }
+
+  private removePendingDevice(deviceId: string): void {
+    this.pendingDeviceIds = this.pendingDeviceIds.filter((item: string): boolean => item !== deviceId);
+  }
+
+  private async refreshDevices(): Promise<void> {
+    if (this.refreshingDevices) return;
+    this.refreshingDevices = true;
+    try {
+      await sharedUsbArcController.refresh();
+    } finally {
+      this.refreshingDevices = false;
+    }
+  }
+
+  private applyNetworkSnapshot(snapshot: NetworkAddressSnapshot): void {
+    this.networkAddresses = snapshot.addresses.filter((address: NetworkInterfaceAddress): boolean =>
+      address.interfaceName === 'wlan0');
+    const failures: Array<string> = snapshot.limitations.filter((limitation: string): boolean =>
+      limitation.indexOf('失败') >= 0);
+    this.networkEnumerationWarning = failures.length > 0 ? '部分网卡信息未能读取，地址列表可能不完整。' : '';
+  }
+
+  private connectionAddress(address: NetworkInterfaceAddress): string {
+    if (address.family === 'IPv6') {
+      return `[${address.address}]:${this.serverStatus.port}`;
+    }
+    return `${address.address}:${this.serverStatus.port}`;
+  }
+
+  private addressMatchesListener(address: NetworkInterfaceAddress): boolean {
+    if (!this.serverStatus.running || address.isLoopback ||
+      !this.serverStatus.listenerFamilies.includes(address.family)) {
+      return false;
+    }
+    if (address.family === 'IPv4' && !address.serverReachable) return false;
+    if (this.serverStatus.host.length === 0 || this.serverStatus.host === '0.0.0.0' || this.serverStatus.host === '::') {
+      return true;
+    }
+    const configuredHost: string = this.serverStatus.host.split('%')[0];
+    const localAddress: string = address.address.split('%')[0];
+    return configuredHost === localAddress;
+  }
+
+  private addressNote(address: NetworkInterfaceAddress): string {
+    if (address.isLoopback) return '仅本机';
+    if (this.addressMatchesListener(address)) return '监听中';
+    if (!this.serverStatus.running) return '服务启动后确认';
+    return '未被监听';
+  }
+
+  private async copyNetworkAddress(address: NetworkInterfaceAddress): Promise<void> {
+    const value: string = this.addressMatchesListener(address) ? this.connectionAddress(address) : address.address;
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, value);
+      await pasteboard.getSystemPasteboard().setData(data);
+      this.getUIContext().getPromptAction().showToast({ message: this.addressMatchesListener(address) ? '连接端点已复制' : 'IP地址已复制' });
+    } catch (_error) {
+      this.getUIContext().getPromptAction().showToast({ message: '复制地址失败。' });
+    }
+  }
+
+  @Builder
+  private NetworkAddressItem(address: NetworkInterfaceAddress) {
+    Row({ space: 10 }) {
+      Column({ space: 5 }) {
+        Row({ space: 8 }) {
+          Text(`${address.interfaceName}  /${address.prefixLength}`)
+            .fontSize(11)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('sys.color.font_secondary'))
+          if (this.addressNote(address).length > 0) {
+            Text(this.addressNote(address))
+              .fontSize(10)
+              .fontColor($r('sys.color.font_secondary'))
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .backgroundColor($r('app.color.card_background'))
+              .borderRadius(8)
+          }
+        }
+        .width('100%')
+        Text(this.addressMatchesListener(address) ?
+          this.connectionAddress(address) : address.address)
+          .fontSize(14)
+          .fontColor(this.addressMatchesListener(address) ? $r('app.color.accent') : $r('sys.color.font_primary'))
+          .wordBreak(WordBreak.BREAK_ALL)
+          .width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      Button(this.addressMatchesListener(address) ? '复制端点' : '复制 IP')
+        .fontSize(12)
+        .padding({ left: 8, right: 8 })
+        .onClick((): void => { void this.copyNetworkAddress(address); })
+    }
+    .width('100%')
+    .padding({ top: 9, bottom: 9, left: 10, right: 10 })
+    .backgroundColor($r('app.color.page_background'))
+    .borderRadius(12)
+  }
+
+  @Builder
+  private NetworkAddressGroup(options: NetworkAddressGroupOptions) {
+    Column({ space: 8 }) {
+      Row({ space: 10 }) {
+        Text(options.title).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('sys.color.font_primary'))
+        Text(`${this.networkAddresses.filter((item: NetworkInterfaceAddress): boolean => item.family === options.family).length}`)
+          .fontSize(11).fontColor($r('sys.color.font_secondary'))
+        if (this.serverStatus.running && this.serverStatus.listenerFamilies.includes(options.family)) {
+          Text('正在监听')
+            .fontSize(10)
+            .fontColor($r('app.color.accent'))
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      if (this.networkAddresses.filter((item: NetworkInterfaceAddress): boolean => item.family === options.family).length === 0) {
+        Text(this.networkRefreshing ? `正在读取 ${options.family} 地址…` : `未获取到 ${options.family} 地址`)
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .padding({ top: 4, bottom: 4 })
+      } else {
+        Column({ space: 6 }) {
+          ForEach(this.networkAddresses.filter((item: NetworkInterfaceAddress): boolean => item.family === options.family),
+            (item: NetworkInterfaceAddress) => {
+              Column() {
+                this.NetworkAddressItem(item)
+              }
+                .width('100%')
+            }, (item: NetworkInterfaceAddress): string => item.key)
+        }
+        .width('100%')
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   private async toggleServer(): Promise<void> {
-    if (this.busy) {
+    if (this.serverActionPending) return;
+    if (!this.serverStatus.running) {
+      this.confirmStartServer();
       return;
     }
-    this.busy = true;
+    await this.performServerAction(false);
+  }
+
+  private confirmStartServer(): void {
+    if (this.startNoticeOpen) return;
+    this.startNoticeOpen = true;
+    this.getUIContext().showAlertDialog({
+      title: '允许 USBArc 接收入站连接？',
+      message: `将监听 TCP ${this.preferences.port}（${this.plannedListenerFamily()}）。通过 MeshArc 连接时，请在 MeshArc 放行此端口。`,
+      autoCancel: true,
+      primaryButton: {
+        value: '取消',
+        action: (): void => { this.startNoticeOpen = false; }
+      },
+      secondaryButton: {
+        value: '允许并启动',
+        action: (): void => {
+          this.startNoticeOpen = false;
+          void this.performServerAction(true);
+        }
+      },
+      cancel: (): void => { this.startNoticeOpen = false; }
+    });
+  }
+
+  private async performServerAction(start: boolean): Promise<void> {
+    if (this.serverActionPending) return;
+    this.serverActionPending = true;
     try {
-      if (this.serverStatus.running) {
+      const succeeded: boolean = start ? await sharedUsbArcController.startServer() :
         await sharedUsbArcController.stopServer();
-      } else {
-        await sharedUsbArcController.startServer();
+      if (!succeeded) {
+        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage(start ? 'USB/IP 服务启动失败。' : '停止 USB/IP 服务失败。') });
       }
     } finally {
-      this.busy = false;
+      this.serverActionPending = false;
     }
   }
 
   private async requestPermission(deviceId: string): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-    this.busy = true;
+    if (!this.addPendingDevice(deviceId)) return;
     try {
-      await sharedUsbArcController.requestPermission(deviceId);
+      const granted: boolean = await sharedUsbArcController.requestPermission(deviceId);
+      if (!granted) {
+        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage('尚未获得 USB 授权，请完成系统确认。') });
+      }
     } finally {
-      this.busy = false;
+      this.removePendingDevice(deviceId);
     }
   }
 
   private async shareDevice(deviceId: string): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-    this.busy = true;
+    if (!this.addPendingDevice(deviceId)) return;
     try {
-      await sharedUsbArcController.shareDevice(deviceId);
+      const shared: boolean = await sharedUsbArcController.shareDevice(deviceId);
+      if (!shared) {
+        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage('共享设备失败。') });
+      }
     } finally {
-      this.busy = false;
+      this.removePendingDevice(deviceId);
     }
   }
 
   private async unshareDevice(deviceId: string): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-    this.busy = true;
+    if (!this.addPendingDevice(deviceId)) return;
     try {
-      await sharedUsbArcController.unshareDevice(deviceId);
+      const unshared: boolean = await sharedUsbArcController.unshareDevice(deviceId);
+      if (!unshared) {
+        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage('停止共享失败。') });
+      }
     } finally {
-      this.busy = false;
+      this.removePendingDevice(deviceId);
     }
   }
 
-  private async exitApplication(): Promise<void> {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined) {
-      return;
+  private tabBarWidth(): number {
+    return Math.min(Math.max(0, this.layoutWidth - 32), this.layoutWidth < 600 ? 520 : 800);
+  }
+
+  private plannedListenerFamily(): string {
+    const host: string = this.preferences.host.trim();
+    if (host.length === 0 || host === '0.0.0.0' || host === '::') return 'IPv4 / IPv6';
+    return host.includes(':') ? 'IPv6' : 'IPv4';
+  }
+
+  private hasTabBarImage(): boolean {
+    if (this.preferences.tabBarImagePath.length === 0) {
+      return false;
     }
-    this.busy = true;
     try {
-      await UsbArcLifecycle.exit(context);
-    } catch (error) {
-      const businessError: BusinessError = error as BusinessError;
-      this.busy = false;
-      this.getUIContext().getPromptAction().showToast({
-        message: `退出时清理失败，code=${businessError.code ?? -1}`
-      });
+      return fileIo.accessSync(this.preferences.tabBarImagePath);
+    } catch (_error) {
+      return false;
     }
-  }
-
-  private selectTab(tab: UsbArcTab): void {
-    this.activeTab = tab;
-  }
-
-  @Builder
-  private Metric(value: string, label: string) {
-    Column({ space: 4 }) {
-      Text(value).fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('sys.color.font_primary'))
-      Text(label).fontSize(12).fontColor($r('sys.color.font_secondary'))
-    }
-    .alignItems(HorizontalAlign.Start)
-    .padding({ right: 28 })
   }
 
   @Builder
@@ -115,7 +346,7 @@ struct Index {
         Row({ space: 18 }) {
           Column({ space: 6 }) {
             Text('USB 设备共享')
-              .fontSize(32)
+              .fontSize(26)
               .fontWeight(FontWeight.Bold)
               .fontColor($r('sys.color.font_primary'))
             Text('让局域网中的 USB/IP 客户端访问本机 USB 设备')
@@ -125,74 +356,126 @@ struct Index {
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
           Button('刷新设备')
-            .enabled(!this.busy)
-            .onClick((): void => { void sharedUsbArcController.refresh(); })
+            .onClick((): void => { void this.refreshDevices(); })
         }
         .width('100%')
         .padding({ top: 26, bottom: 4 })
 
-        Column({ space: 20 }) {
+        Column({ space: 12 }) {
           Row({ space: 14 }) {
-            Circle()
-              .width(12)
-              .height(12)
-              .fill(this.serverStatus.running ? '#FF42C98A' : '#FF8993A3')
-            Column({ space: 5 }) {
-              Text(this.serverStatus.running ? 'USB/IP 服务正在运行' : 'USB/IP 服务已停止')
-                .fontSize(21)
-                .fontWeight(FontWeight.Bold)
-                .fontColor($r('sys.color.font_primary'))
-              Text(this.serverStatus.running ?
-                `监听 ${this.serverStatus.host}:${this.serverStatus.port}` : '启动服务后，已共享设备即可供客户端连接')
-                .fontSize(14)
-                .fontColor($r('sys.color.font_secondary'))
+            Row({ space: 10 }) {
+              Circle()
+                .width(10)
+                .height(10)
+                .fill(this.serverStatus.running ? '#FF42C98A' : '#FF8993A3')
+              Column({ space: 4 }) {
+                Text(this.serverStatus.running ? 'USB/IP 服务正在运行' : 'USB/IP 服务已停止')
+                  .fontSize(18)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('sys.color.font_primary'))
+                Text(this.serverStatus.running ? '局域网客户端可连接本机共享设备' : '启动服务后，已共享设备即可供客户端访问')
+                  .fontSize(13)
+                  .fontColor($r('sys.color.font_secondary'))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
             }
             .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-            Text(this.serverStatus.running ? '运行中' : '已停止')
-              .fontSize(12)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.serverStatus.running ? '#FF42C98A' : $r('sys.color.font_secondary'))
-              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-              .backgroundColor(this.serverStatus.running ? '#2432A978' : $r('sys.color.background_secondary'))
-              .borderRadius(20)
-            Button(this.serverStatus.running ? '停止服务' : '启动服务')
-              .enabled(!this.busy)
+            .height(54)
+            .alignItems(VerticalAlign.Center)
+
+            Button(this.serverActionPending ? '正在处理…' : (this.serverStatus.running ? '停止服务' : '启动服务'))
               .onClick((): void => { void this.toggleServer(); })
           }
           .width('100%')
 
-          Row({ space: 0 }) {
-            this.Metric(`${this.devices.filter((device: UsbDeviceInfo): boolean => device.shared).length}`, '共享设备')
-            this.Metric(`${this.serverStatus.clientCount}`, '连接客户端')
-            this.Metric(`${this.devices.length}`, '检测设备')
-            Text(`地址  ${this.serverStatus.host}:${this.serverStatus.port}`)
-              .fontSize(13)
-              .fontColor($r('sys.color.font_secondary'))
-              .layoutWeight(1)
+          Row({ space: 10 }) {
+            MetricItem({
+              value: `${this.serverStatus.running ? this.serverStatus.sharedDeviceIds.length : 0}`,
+              label: '共享设备'
+            })
+            MetricItem({ value: `${this.serverStatus.clientCount}`, label: '连接客户端' })
+            MetricItem({ value: `${this.devices.length}`, label: '检测设备' })
           }
           .width('100%')
-          .padding({ top: 18 })
-          .border({ width: { top: 1 }, color: $r('sys.color.comp_divider') })
+          .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+          .backgroundColor($r('sys.color.comp_background_tertiary'))
+          .borderRadius(14)
+
+          Row({ space: 6 }) {
+            Text('监听配置')
+              .fontSize(12)
+              .fontColor($r('sys.color.font_secondary'))
+            Text(`${this.serverStatus.host === '0.0.0.0' || this.serverStatus.host === '::' ? '所有网络接口' : this.serverStatus.host}  ·  端口 ${this.serverStatus.port}`)
+              .fontSize(12)
+              .fontColor($r('sys.color.font_primary'))
+          }
+          .width('100%')
 
           if (this.serverStatus.lastError.length > 0) {
             Text(this.serverStatus.lastError)
               .fontSize(13)
               .fontColor('#FFFF7B72')
               .width('100%')
-          } else if (this.serverStatus.running) {
-            Text('USB/IP不提供内置认证或加密，请仅在可信网络或现有安全隧道中使用。')
-              .fontSize(12)
+          }
+        }
+        .width('100%')
+        .padding(16)
+        .alignItems(HorizontalAlign.Start)
+        .backgroundColor($r('app.color.card_background'))
+        .border({ width: 1, color: $r('app.color.card_border') })
+        .borderRadius(24)
+
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text('wlan0 网络地址')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('sys.color.font_primary'))
+              Text('显示该网卡上的全部 IP 地址。')
+                .fontSize(12)
+                .fontColor($r('sys.color.font_secondary'))
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            Button(this.networkRefreshing ? '刷新中…' : '刷新地址')
+              .enabled(!this.networkRefreshing)
+              .onClick((): void => { void this.refreshNetworkAddresses(); })
+          }
+          .width('100%')
+          if (this.wideLayout) {
+            Row({ space: 16 }) {
+              Column() {
+                this.NetworkAddressGroup(IPV4_NETWORK_GROUP_OPTIONS)
+              }
+              .layoutWeight(1)
+              Column() {
+                this.NetworkAddressGroup(IPV6_NETWORK_GROUP_OPTIONS)
+              }
+              .layoutWeight(1)
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+          } else {
+            this.NetworkAddressGroup(IPV4_NETWORK_GROUP_OPTIONS)
+            this.NetworkAddressGroup(IPV6_NETWORK_GROUP_OPTIONS)
+          }
+          if (this.networkEnumerationWarning.length > 0) {
+            Text(this.networkEnumerationWarning)
+              .fontSize(11)
               .fontColor($r('sys.color.font_secondary'))
               .width('100%')
           }
         }
         .width('100%')
-        .padding(24)
+        .padding(20)
         .alignItems(HorizontalAlign.Start)
         .backgroundColor($r('app.color.card_background'))
         .border({ width: 1, color: $r('app.color.card_border') })
-        .borderRadius(24)
+        .borderRadius(22)
 
         Row({ space: 12 }) {
           Column({ space: 4 }) {
@@ -246,33 +529,31 @@ struct Index {
           .border({ width: 1, color: $r('app.color.card_border') })
           .borderRadius(24)
         } else {
-          Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+          Grid() {
             ForEach(this.devices, (device: UsbDeviceInfo) => {
-              UsbDeviceCard({
-                device: device,
-                busy: this.busy,
-                onPermission: (deviceId: string): void => { void this.requestPermission(deviceId); },
-                onShare: (deviceId: string): void => { void this.shareDevice(deviceId); },
-                onUnshare: (deviceId: string): void => { void this.unshareDevice(deviceId); }
-              })
-                .width(this.deviceColumns === 3 ? '31%' : (this.deviceColumns === 2 ? '48%' : '100%'))
-                .margin({ right: 12, bottom: 12 })
-            }, (device: UsbDeviceInfo): string => device.id)
+              GridItem() {
+                UsbDeviceCard({
+                  device: device,
+                  serverRunning: this.serverStatus.running,
+                  busy: this.pendingDeviceIds.includes(device.id),
+                  onPermission: (deviceId: string): void => { void this.requestPermission(deviceId); },
+                  onShare: (deviceId: string): void => { void this.shareDevice(deviceId); },
+                  onUnshare: (deviceId: string): void => { void this.unshareDevice(deviceId); }
+                })
+              }.height(286)
+            }, (device: UsbDeviceInfo): string =>
+              `${device.id}|${device.authorized}|${device.shared}|${device.occupied}|${device.imported}|${device.closing}|${device.available}|${device.product}|${device.name}|${device.manufacturer}|${device.serialNumber}|${this.serverStatus.running}|${this.pendingDeviceIds.includes(device.id)}`)
           }
+          .columnsTemplate(this.deviceColumns === 3 ? '1fr 1fr 1fr' : (this.deviceColumns === 2 ? '1fr 1fr' : '1fr'))
+          .columnsGap(12)
+          .rowsGap(12)
           .width('100%')
-        }
-
-        if (this.actionMessage.length > 0) {
-          Text(this.actionMessage)
-            .fontSize(13)
-            .fontColor($r('sys.color.font_secondary'))
-            .width('100%')
-            .padding({ left: 4, right: 4, bottom: 18 })
+          .scrollBar(BarState.Off)
         }
       }
       .width('100%')
       .constraintSize({ maxWidth: 2200 })
-      .padding({ left: this.wideLayout ? 42 : 20, right: this.wideLayout ? 42 : 20, bottom: 36 })
+      .padding({ left: this.wideLayout ? 42 : 20, right: this.wideLayout ? 42 : 20, bottom: 100 })
       .alignSelf(ItemAlign.Center)
       .alignItems(HorizontalAlign.Start)
     }
@@ -281,53 +562,98 @@ struct Index {
     .scrollBar(BarState.Auto)
   }
 
-  @Builder
-  private TabItem(tab: UsbArcTab, label: string) {
-    Column({ space: 3 }) {
-      if (tab === 'devices') {
-        Image(this.activeTab === tab ? $r('app.media.tab_devices') : $r('app.media.tab_devices_inactive'))
-          .width(24).height(24)
-      } else {
-        Image(this.activeTab === tab ? $r('app.media.tab_settings') : $r('app.media.tab_settings_inactive'))
-          .width(24).height(24)
-      }
-      Text(label)
-        .fontSize(12)
-        .fontWeight(this.activeTab === tab ? FontWeight.Medium : FontWeight.Regular)
-        .fontColor(this.activeTab === tab ? '#FF6BA7FF' : $r('sys.color.font_secondary'))
-    }
-    .width(120)
-    .height(58)
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor(this.activeTab === tab ? $r('app.color.accent_soft') : Color.Transparent)
-    .borderRadius(28)
-    .onClick((): void => this.selectTab(tab))
-  }
-
   build() {
-    Column() {
-      if (this.activeTab === 'devices') {
-        this.HomeContent()
-      } else {
-        UsbArcSettings()
-          .layoutWeight(1)
+    Stack() {
+      if (this.preferences.appBackgroundEnabled && this.hasTabBarImage()) {
+        Image(fileUri.getUriFromPath(this.preferences.tabBarImagePath))
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .opacity(0.42)
+          .hitTestBehavior(HitTestMode.None)
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.app_background_tint'))
+          .hitTestBehavior(HitTestMode.None)
       }
-
-      Row({ space: 8 }) {
-        this.TabItem('devices', '设备')
-        this.TabItem('settings', '设置')
+      HdsTabs({
+        barPosition: BarPosition.End,
+        index: this.activeTab === 'devices' ? 0 : 1,
+        controller: this.tabsController
+      }) {
+        TabContent() {
+          this.HomeContent()
+        }
+          .tabBar(new BottomTabBarStyle({
+            normal: new SymbolGlyphModifier($r('sys.symbol.externaldrive'))
+              .fontSize(24).fontColor([$r('sys.color.font_secondary')]),
+            selected: new SymbolGlyphModifier($r('sys.symbol.externaldrive'))
+              .fontSize(24).fontColor([$r('app.color.accent')])
+          }, '设备')
+            .id('tab-devices')
+            .labelStyle({
+              unselectedColor: $r('sys.color.font_secondary'),
+              selectedColor: $r('app.color.accent')
+            })
+            .iconStyle({
+              unselectedColor: $r('sys.color.font_secondary'),
+              selectedColor: $r('app.color.accent')
+            }))
+        TabContent() {
+          UsbArcSettings()
+        }
+          .tabBar(new BottomTabBarStyle({
+            normal: new SymbolGlyphModifier($r('sys.symbol.gearshape'))
+              .fontSize(24).fontColor([$r('sys.color.font_secondary')]),
+            selected: new SymbolGlyphModifier($r('sys.symbol.gearshape'))
+              .fontSize(24).fontColor([$r('app.color.accent')])
+          }, '设置')
+            .id('tab-settings')
+            .labelStyle({
+              unselectedColor: $r('sys.color.font_secondary'),
+              selectedColor: $r('app.color.accent')
+            })
+            .iconStyle({
+              unselectedColor: $r('sys.color.font_secondary'),
+              selectedColor: $r('app.color.accent')
+            }))
       }
-      .padding(8)
-      .backgroundColor($r('app.color.card_background'))
-      .border({ width: 1, color: $r('app.color.card_border') })
-      .borderRadius(38)
-      .shadow({ radius: 20, color: '#33000000', offsetY: 5 })
-      .margin({ bottom: 18 })
+      .vertical(false)
+      .scrollable(true)
+      .animationDuration(250)
+      .barMode(BarMode.Fixed)
+      .barWidth(this.tabBarWidth())
+      .barHeight(56)
+      .barOverlap(true)
+      .barBackgroundColor(Color.Transparent)
+      .barFloatingStyle({
+        barSideMargin: 16,
+        barBottomMargin: 18,
+        gradientMask: {
+          maskColor: $r('app.color.page_background'),
+          maskHeight: 90
+        },
+        lightColor: $r('app.color.accent'),
+        barOpacity: 0.96,
+        thermoCtrl: true,
+        systemMaterialEffect: {
+          materialType: hdsMaterial.MaterialType.IMMERSIVE,
+          materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+        }
+      })
+      .divider({ mode: DividerMode.NONE })
+      .onChange((index: number): void => {
+        this.activeTab = index === 0 ? 'devices' : 'settings';
+      })
+      .width('100%')
+      .height('100%')
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.page_background'))
     .onAreaChange((_oldValue: Area, newValue: Area): void => {
+      this.layoutWidth = Number(newValue.width);
       this.wideLayout = newValue.width >= 1100;
       this.deviceColumns = newValue.width >= 1500 ? 3 : (newValue.width >= 1100 ? 2 : 1);
     })

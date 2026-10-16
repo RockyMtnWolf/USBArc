@@ -1,8 +1,10 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
-import { UsbIpServerSettings } from '../usb/UsbModels';
+import { UsbBackendMode, UsbIpServerSettings } from '../usb/UsbModels';
 
 export type AutoShareScope = 'all' | 'rules';
+export type UsbArcTabBarStyle = 'material' | 'light' | 'dark' | 'accent' | 'image';
+export type UsbArcThemeMode = 'system' | 'light' | 'dark';
 
 export interface UsbAutoShareRule {
   id: string;
@@ -12,6 +14,7 @@ export interface UsbAutoShareRule {
 }
 
 export interface UsbArcPreferencesData {
+  backendMode: UsbBackendMode;
   host: string;
   port: number;
   autoRequestPermission: boolean;
@@ -19,7 +22,12 @@ export interface UsbArcPreferencesData {
   autoShareScope: AutoShareScope;
   maxClients: number;
   forceClaim: boolean;
+  retainClaimsOnStop: boolean;
   backgroundTaskMode: 'off' | 'download' | 'taskKeeping';
+  themeMode: UsbArcThemeMode;
+  tabBarStyle: UsbArcTabBarStyle;
+  tabBarImagePath: string;
+  appBackgroundEnabled: boolean;
   rules: Array<UsbAutoShareRule>;
 }
 
@@ -27,6 +35,7 @@ const STORE_NAME: string = 'usbarc_settings';
 const SETTINGS_KEY: string = 'settings_v1';
 
 export const DEFAULT_USB_ARC_PREFERENCES: UsbArcPreferencesData = {
+  backendMode: 'usbManager',
   host: '0.0.0.0',
   port: 3240,
   autoRequestPermission: false,
@@ -34,7 +43,12 @@ export const DEFAULT_USB_ARC_PREFERENCES: UsbArcPreferencesData = {
   autoShareScope: 'all',
   maxClients: 4,
   forceClaim: false,
+  retainClaimsOnStop: false,
   backgroundTaskMode: 'off',
+  themeMode: 'system',
+  tabBarStyle: 'material',
+  tabBarImagePath: '',
+  appBackgroundEnabled: false,
   rules: []
 };
 
@@ -61,17 +75,20 @@ export class UsbArcPreferences {
 
   static toServerSettings(settings: UsbArcPreferencesData): UsbIpServerSettings {
     return {
+      backendMode: settings.backendMode,
       host: settings.host,
       port: settings.port,
       autoRequestPermission: settings.autoRequestPermission,
       autoShare: settings.autoShare,
       maxClients: settings.maxClients,
-      forceClaim: settings.forceClaim
+      forceClaim: settings.forceClaim,
+      retainClaimsOnStop: settings.retainClaimsOnStop
     };
   }
 
   static copy(settings: UsbArcPreferencesData): UsbArcPreferencesData {
     return {
+      backendMode: settings.backendMode,
       host: settings.host,
       port: settings.port,
       autoRequestPermission: settings.autoRequestPermission,
@@ -79,7 +96,12 @@ export class UsbArcPreferences {
       autoShareScope: settings.autoShareScope,
       maxClients: settings.maxClients,
       forceClaim: settings.forceClaim,
+      retainClaimsOnStop: settings.retainClaimsOnStop,
       backgroundTaskMode: settings.backgroundTaskMode,
+      themeMode: settings.themeMode,
+      tabBarStyle: settings.tabBarStyle,
+      tabBarImagePath: settings.tabBarImagePath,
+      appBackgroundEnabled: settings.appBackgroundEnabled,
       rules: settings.rules.map((rule: UsbAutoShareRule): UsbAutoShareRule => ({
         id: rule.id,
         vendorIdHex: rule.vendorIdHex,
@@ -145,9 +167,11 @@ export class UsbArcPreferences {
       });
     }
     const scope: string = source['autoShareScope'] as string;
+    const backendMode: UsbBackendMode = source['backendMode'] === 'usbDdk' ? 'usbDdk' : 'usbManager';
     const port: number = Number(source['port']);
     const maxClients: number = Number(source['maxClients']);
     return {
+      backendMode,
       host: typeof source['host'] === 'string' && (source['host'] as string).length > 0 ?
         source['host'] as string : DEFAULT_USB_ARC_PREFERENCES.host,
       port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_USB_ARC_PREFERENCES.port,
@@ -157,8 +181,16 @@ export class UsbArcPreferences {
       maxClients: Number.isInteger(maxClients) && maxClients > 0 && maxClients <= 32 ?
         maxClients : DEFAULT_USB_ARC_PREFERENCES.maxClients,
       forceClaim: source['forceClaim'] === true,
+      retainClaimsOnStop: source['retainClaimsOnStop'] === true,
       backgroundTaskMode: source['backgroundTaskMode'] === 'download' ||
         source['backgroundTaskMode'] === 'taskKeeping' ? source['backgroundTaskMode'] as 'download' | 'taskKeeping' : 'off',
+      themeMode: source['themeMode'] === 'light' || source['themeMode'] === 'dark' ?
+        source['themeMode'] as UsbArcThemeMode : 'system',
+      tabBarStyle: source['tabBarStyle'] === 'light' || source['tabBarStyle'] === 'dark' ||
+        source['tabBarStyle'] === 'accent' || source['tabBarStyle'] === 'image' ?
+        source['tabBarStyle'] as UsbArcTabBarStyle : 'material',
+      tabBarImagePath: typeof source['tabBarImagePath'] === 'string' ? source['tabBarImagePath'] as string : '',
+      appBackgroundEnabled: source['appBackgroundEnabled'] === true,
       rules: rules
     };
   }

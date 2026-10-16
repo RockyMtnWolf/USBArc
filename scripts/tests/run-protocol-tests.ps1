@@ -1,5 +1,5 @@
 param(
-  [string]$Scope = 'UsbIpProtocolTest,UsbArcDevicePolicyTest'
+  [string]$Scope = 'UsbIpProtocolTest,UsbArcDevicePolicyTest,LocalNetworkAddressesTest'
 )
 
 $studioBin = [Environment]::GetEnvironmentVariable('DevEco Studio')
