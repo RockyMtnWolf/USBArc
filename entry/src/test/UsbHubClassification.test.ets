@@ -2,6 +2,7 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   isProvableUsbHub,
   shouldHideDdkHubRow,
+  shouldHideDdkSystemDescription,
   UsbHubDeviceDescriptor,
   UsbHubInterfaceDescriptor
 } from '../main/ets/usb/UsbHubClassification';
@@ -41,6 +42,21 @@ export default function UsbHubClassificationTest() {
       expect(shouldHideDdkHubRow(0x2109, 0x0817, [hub, nonHub])).assertFalse();
       expect(shouldHideDdkHubRow(0x2109, 0x0817, [])).assertFalse();
       expect(shouldHideDdkHubRow(0x1234, 0x5678, [hub])).assertFalse();
+    });
+
+    it('accepts only a complete matching system USB identifier with class 09', 0, () => {
+      const description: string = 'USB&BUS_02&DEV_02&PID_0817&VID_2109&CLASS_09';
+      expect(shouldHideDdkSystemDescription(description, 0x2109, 0x0817)).assertTrue();
+      expect(shouldHideDdkSystemDescription(description, 0x2108, 0x0817)).assertFalse();
+      expect(shouldHideDdkSystemDescription(description, 0x2109, 0x0818)).assertFalse();
+      expect(shouldHideDdkSystemDescription(
+        'USB&BUS_02&DEV_02&PID_0817&VID_2109&CLASS_08', 0x2109, 0x0817)).assertFalse();
+      expect(shouldHideDdkSystemDescription(
+        'USB&DEV_02&PID_0817&VID_2109&CLASS_09', 0x2109, 0x0817)).assertFalse();
+      expect(shouldHideDdkSystemDescription(
+        'USB&BUS_02&DEV_00&PID_0817&VID_2109&CLASS_09', 0x2109, 0x0817)).assertFalse();
+      expect(shouldHideDdkSystemDescription(
+        'USB&BUS_02&DEV_02&PID_0817&VID_2109&CLASS_09&CLASS_09', 0x2109, 0x0817)).assertFalse();
     });
   });
 }
