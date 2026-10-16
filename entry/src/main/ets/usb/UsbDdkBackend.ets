@@ -20,6 +20,7 @@ import {
   UsbTransferResult
 } from './UsbModels';
 import { UsbBackendError } from './UsbManagerBackend';
+import { readUsbNegotiatedSpeed } from '../services/UsbNegotiatedSpeed';
 
 export function makeDdkUsbIpBusId(ddkDeviceId: string): string {
   if (!/^\d{1,20}$/.test(ddkDeviceId)) {
@@ -28,6 +29,26 @@ export function makeDdkUsbIpBusId(ddkDeviceId: string): string {
   const busId: string = `ddk-${ddkDeviceId}`;
   if (busId.length > 31) throw new DdkDriverClientError('DDK logical bus ID exceeds USB/IP field length', -22, -22);
   return busId;
+}
+
+export function decodeDdkUsbString(bytes: Array<number>): string {
+  if (bytes.length < 2 || bytes[1] !== 3 || bytes[0] < 2 || bytes[0] > bytes.length || bytes[0] % 2 !== 0) return '';
+  let result: string = '';
+  for (let index: number = 2; index < bytes[0]; index += 2) {
+    const low: number = bytes[index];
+    const high: number = bytes[index + 1];
+    if (!Number.isInteger(low) || !Number.isInteger(high) || low < 0 || low > 255 || high < 0 || high > 255) return '';
+    result += String.fromCharCode(low | (high << 8));
+  }
+  return result.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+}
+
+/** DeviceManager description may be a hardware path rather than a product name. */
+export function ddkDisplayName(product: string, description: string, vendorId: number, productId: number): string {
+  if (product.trim().length > 0) return product.trim();
+  const readable: string = description.trim();
+  if (readable.length > 0 && !/^USB[&\\/]/i.test(readable) && !/VID_[0-9a-f]+/i.test(readable)) return readable;
+  return `USB ${vendorId.toString(16).padStart(4, '0').toUpperCase()}:${productId.toString(16).padStart(4, '0').toUpperCase()}`;
 }
 
 /** A deterministic server-side bus number, explicitly not a physical USB bus number. */
@@ -171,7 +192,7 @@ function makeSystemRow(system: DdkSystemDeviceInfo): UsbDeviceInfo {
   const id: string = `ddk-system-${system.deviceId}`;
   return {
     id,
-    name: system.description.length > 0 ? system.description : `USB ${system.vendorId.toString(16)}:${system.productId.toString(16)}`,
+    name: ddkDisplayName('', system.description, system.vendorId, system.productId),
     path: '',
     busId: `ddk-system-${system.deviceId}`,
     busNum: 0,
@@ -180,7 +201,7 @@ function makeSystemRow(system: DdkSystemDeviceInfo): UsbDeviceInfo {
     productId: system.productId,
     speed: 0,
     manufacturer: '',
-    product: system.description,
+    product: '',
     serialNumber: '',
     version: '',
     deviceClass: 0,
@@ -301,6 +322,9 @@ export class UsbDdkBackend {
         const health: DdkDriverHealth = await this.client.checkHealth(systemDeviceId);
         if (health === 'healthy') {
           this.unavailableIds.delete(publicId);
+          if (previouslySelected.speed === 0 && !this.handles.has(publicId)) {
+            previouslySelected.speed = await readUsbNegotiatedSpeed(system.vendorId, system.productId, true);
+          }
           // Never rebind a live selection: it may have interfaces claimed by an active import.
           return this.copyInfo(previouslySelected);
         }
@@ -335,19 +359,20 @@ export class UsbDdkBackend {
       }
       const orderedConfigurations: Array<UsbConfigurationInfo> =
         activeConfigurationFirst(configurations, activeConfigurationValue);
+      const strings: Array<string> = await this.readDeviceStrings(systemDeviceId, descriptor);
       const info: UsbDeviceInfo = {
         id: `ddk-system-${systemDeviceId}`,
-        name: system.description.length > 0 ? system.description : `USB ${system.vendorId.toString(16)}:${system.productId.toString(16)}`,
+        name: ddkDisplayName(strings[1], system.description, descriptor.vendorId, descriptor.productId),
         path: `ddk/${descriptor.id}`,
         busId,
         busNum: logicalBusNumber,
         devAddress: 1,
         vendorId: descriptor.vendorId,
         productId: descriptor.productId,
-        speed: 0,
-        manufacturer: '',
-        product: system.description,
-        serialNumber: '',
+        speed: await readUsbNegotiatedSpeed(descriptor.vendorId, descriptor.productId, true),
+        manufacturer: strings[0],
+        product: strings[1],
+        serialNumber: strings[2],
         version: bcdVersion(descriptor.bcdDevice),
         deviceClass: descriptor.deviceClass,
         deviceSubClass: descriptor.deviceSubClass,
@@ -370,6 +395,42 @@ export class UsbDdkBackend {
       if (error instanceof DdkDriverClientError) throw error;
       throw new DdkDriverClientError('Could not resolve selected DDK device identity', -5, -5);
     }
+  }
+
+  private async readDeviceStrings(systemDeviceId: number, descriptor: DdkDeviceDescriptor): Promise<Array<string>> {
+    const result: Array<string> = ['', '', ''];
+    const indexes: Array<number> = descriptor.bytes.slice(14, 17);
+    if (indexes.length !== 3 || indexes.every((index: number): boolean => index === 0)) return result;
+    let language: number = 0;
+    try {
+      const languages: DdkTransferResult = await this.client.controlTransfer(systemDeviceId, descriptor.id,
+        [0x80, 6, 0, 3, 0, 0, 255, 0], new Array<number>(255).fill(0), 1000);
+      const bytes: Array<number> = languages.data;
+      if (bytes.length < 4 || bytes[1] !== 3 || bytes[0] < 4 || bytes[0] > bytes.length || bytes[0] % 2 !== 0) return result;
+      language = bytes[2] | (bytes[3] << 8);
+      for (let offset: number = 2; offset < bytes[0]; offset += 2) {
+        const candidate: number = bytes[offset] | (bytes[offset + 1] << 8);
+        if (candidate === 0x0409) language = candidate;
+      }
+    } catch (_error) {
+      return result;
+    }
+    const cached: Map<number, string> = new Map<number, string>();
+    for (let slot: number = 0; slot < indexes.length; slot++) {
+      const index: number = indexes[slot];
+      if (!Number.isInteger(index) || index < 1 || index > 255) continue;
+      const previous: string | undefined = cached.get(index);
+      if (previous !== undefined) { result[slot] = previous; continue; }
+      try {
+        const response: DdkTransferResult = await this.client.controlTransfer(systemDeviceId, descriptor.id,
+          [0x80, 6, index, 3, language & 255, language >> 8, 255, 0], new Array<number>(255).fill(0), 1000);
+        result[slot] = decodeDdkUsbString(response.data);
+        cached.set(index, result[slot]);
+      } catch (_error) {
+        // Optional strings do not invalidate a successful driver bind and descriptor query.
+      }
+    }
+    return result;
   }
 
   addShared(deviceId: string): void {
@@ -425,6 +486,12 @@ export class UsbDdkBackend {
     const info: UsbDeviceInfo | undefined = this.selected.get(deviceId);
     if (info === undefined || info.backendDeviceId === undefined || info.opaqueDeviceId === undefined) {
       throw new UsbBackendError('DDK device is not bound and initialized', -13);
+    }
+    if (info.speed === 0) {
+      info.speed = await readUsbNegotiatedSpeed(info.vendorId, info.productId, true);
+    }
+    if (info.speed === 0) {
+      throw new UsbBackendError('无法读取实际 USB 速率；请完成系统 USB 授权后重新共享。设备传输仍使用 DDK。', -95);
     }
     const configuration: UsbConfigurationInfo | undefined = info.configurations[0];
     if (configuration === undefined || configuration.interfaces.length === 0) {
