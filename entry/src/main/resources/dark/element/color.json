@@ -9,6 +9,9 @@
     { "name": "card_border", "value": "#303946" },
     { "name": "accent", "value": "#75A9FF" },
     { "name": "accent_soft", "value": "#27384F" },
-    { "name": "nav_inactive", "value": "#9AA5B5" }
+    { "name": "nav_inactive", "value": "#9AA5B5" },
+    { "name": "tab_bar_light", "value": "#FFF7F9FC" },
+    { "name": "tab_bar_dark", "value": "#FF1B222C" },
+    { "name": "app_background_tint", "value": "#880D1117" }
   ]
 }

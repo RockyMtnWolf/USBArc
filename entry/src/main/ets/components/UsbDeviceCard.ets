@@ -4,6 +4,7 @@ import { UsbDeviceInfo } from '../usb/UsbModels';
 export struct UsbDeviceCard {
   @Prop device: UsbDeviceInfo;
   @Prop busy: boolean = false;
+  @Prop serverRunning: boolean = false;
   onPermission: (deviceId: string) => void = (_deviceId: string): void => {};
   onShare: (deviceId: string) => void = (_deviceId: string): void => {};
   onUnshare: (deviceId: string) => void = (_deviceId: string): void => {};
@@ -13,20 +14,44 @@ export struct UsbDeviceCard {
   }
 
   private title(): string {
-    if (this.device.product.length > 0) {
-      return this.device.product;
-    }
-    if (this.device.name.length > 0) {
-      return this.device.name;
-    }
+    const product: string = this.device.product.trim();
+    if (product.length > 0) return product;
+    const name: string = this.device.name.trim();
+    if (name.length > 0) return name;
     return `USB ${this.hexId(this.device.vendorId)}:${this.hexId(this.device.productId)}`;
   }
 
+  private statusLabel(): string {
+    if (this.device.closing) return '正在释放';
+    if (this.device.imported) return '客户端使用中';
+    if (this.serverRunning && this.device.shared && this.device.occupied) return '共享中';
+    if (this.device.occupied) return '本机占用';
+    if (this.serverRunning && this.device.shared) return '等待设备占用';
+    return '空闲';
+  }
+
+  private deviceIcon(): Resource {
+    const identity: string = `${this.device.product} ${this.device.name} ${this.device.manufacturer}`.toLowerCase();
+    if (identity.includes('sandisk') || identity.includes('flash') || identity.includes('disk') ||
+      identity.includes('storage') || identity.includes('mass storage')) {
+      return $r('app.media.lucide_hard_drive');
+    }
+    if (identity.includes('stlink') || identity.includes('st-link') || identity.includes('j-link') ||
+      identity.includes('jlink') || identity.includes('debug') || identity.includes('stm32')) {
+      return $r('app.media.lucide_cpu');
+    }
+    if (identity.includes('serial') || identity.includes('uart') || identity.includes('cdc') ||
+      identity.includes('cp210') || identity.includes('ch340') || identity.includes('ft232')) {
+      return $r('app.media.lucide_cable');
+    }
+    return $r('app.media.lucide_plug');
+  }
+
   build() {
-    Column({ space: 16 }) {
+    Column() {
       Row({ space: 14 }) {
         Column() {
-          Image($r('app.media.usb_device')).width(32).height(32)
+          Image(this.deviceIcon()).width(32).height(32)
         }
         .width(56)
         .height(56)
@@ -40,67 +65,103 @@ export struct UsbDeviceCard {
             .fontColor($r('sys.color.font_primary'))
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.device.manufacturer.length > 0 ? this.device.manufacturer : '本机 USB 设备')
+          Text(this.device.manufacturer.trim().length > 0 ? this.device.manufacturer.trim() : '本机 USB 设备')
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
-        Text(this.device.shared ? '共享中' : (this.device.authorized ? '已授权' : '未授权'))
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.device.shared ? '#FF42C98A' : (this.device.authorized ? '#FF68B8FF' : $r('sys.color.font_secondary')))
-          .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-          .backgroundColor(this.device.shared ? '#2432A978' : (this.device.authorized ? '#243D82C4' : $r('sys.color.background_secondary')))
-          .borderRadius(18)
+        Column({ space: 5 }) {
+          Text(this.statusLabel())
+            .fontSize(11)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.device.closing || this.device.imported ? '#FFFFB86B' :
+              (this.serverRunning && this.device.shared && this.device.occupied ? '#FF42C98A' :
+                (this.device.occupied ? '#FF68B8FF' : $r('sys.color.font_secondary'))))
+            .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+            .backgroundColor(this.device.closing || this.device.imported ? '#24F0A33A' :
+              (this.serverRunning && this.device.shared && this.device.occupied ? '#2432A978' :
+                (this.device.occupied ? '#243D82C4' : $r('sys.color.background_secondary'))))
+            .borderRadius(16)
+          Text(this.device.authorized ? '已授权' : '未授权')
+            .fontSize(10)
+            .fontColor(this.device.authorized ? '#FF68B8FF' : $r('sys.color.font_secondary'))
+        }
+        .width(104)
+        .height(50)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.End)
       }
-      Row({ space: 24 }) {
+      .width('100%')
+      .height(56)
+
+      Row({ space: 16 }) {
         Column({ space: 4 }) {
           Text('设备 ID').fontSize(11).fontColor($r('sys.color.font_secondary'))
           Text(`${this.hexId(this.device.vendorId)} : ${this.hexId(this.device.productId)}`)
             .fontSize(13)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('sys.color.font_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
         Column({ space: 4 }) {
           Text('USB 地址').fontSize(11).fontColor($r('sys.color.font_secondary'))
-          Text(`总线 ${this.device.busNum}  ·  地址 ${this.device.devAddress}`)
+          Text(`总线 ${this.device.busNum} · 地址 ${this.device.devAddress}`)
             .fontSize(13)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('sys.color.font_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        if (!this.device.available) {
-          Text('当前不可用').fontSize(12).fontColor('#FFFFB86B')
-        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
       }
-      if (this.device.serialNumber.length > 0) {
-        Text(`序列号 ${this.device.serialNumber}`)
-          .fontSize(12)
-          .fontColor($r('sys.color.font_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      Divider().color($r('sys.color.comp_divider'))
+      .width('100%')
+      .height(40)
+
+      Text(this.device.serialNumber.length > 0 ? `序列号 ${this.device.serialNumber}` : ' ')
+        .fontSize(12)
+        .fontColor($r('sys.color.font_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .height(18)
+
+      Divider().color($r('sys.color.comp_divider')).height(1)
+
       Row({ space: 8 }) {
-        Button('请求系统授权')
-          .enabled(!this.busy && !this.device.authorized)
-          .onClick((): void => this.onPermission(this.device.id))
+        if (!this.device.authorized) {
+          Button(this.busy ? '处理中…' : '请求系统授权')
+            .height(40)
+            .enabled(!this.busy && !this.device.closing)
+            .onClick((): void => this.onPermission(this.device.id))
+        }
         if (this.device.shared) {
-          Button('停止共享')
-            .enabled(!this.busy)
+          Button(this.busy ? '处理中…' : '停止共享')
+            .height(40)
+            .enabled(!this.busy && !this.device.closing)
             .onClick((): void => this.onUnshare(this.device.id))
         } else {
-          Button('共享设备')
-            .enabled(!this.busy && this.device.authorized && this.device.available)
+          Button(this.busy ? '处理中…' : (this.serverRunning ? '共享设备' : '设为共享'))
+            .height(40)
+            .enabled(!this.busy && !this.device.closing && !this.device.imported && this.device.authorized)
             .onClick((): void => this.onShare(this.device.id))
         }
       }
       .width('100%')
+      .height(42)
       .justifyContent(FlexAlign.End)
     }
     .width('100%')
-    .padding(16)
+    .height('100%')
+    .justifyContent(FlexAlign.SpaceBetween)
     .alignItems(HorizontalAlign.Start)
+    .padding(16)
     .backgroundColor($r('app.color.card_background'))
     .border({ width: 1, color: $r('app.color.card_border') })
     .borderRadius(24)

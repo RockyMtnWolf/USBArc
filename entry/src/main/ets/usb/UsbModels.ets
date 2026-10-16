@@ -48,19 +48,31 @@ export interface UsbDeviceInfo {
   deviceSubClass: number;
   deviceProtocol: number;
   configurations: Array<UsbConfigurationInfo>;
+  /** True only when usbManager.hasRight currently confirms device access. */
   authorized: boolean;
+  /** True only while this app holds a claimed USB interface handle. */
+  occupied: boolean;
+  /** Shared is server export policy; it does not imply an interface is claimed. */
   shared: boolean;
+  /** True while a USB/IP client owns this device import session. */
+  imported: boolean;
+  /** True while a previous connection's USB transfers are draining; this device cannot be reused yet. */
+  closing: boolean;
   available: boolean;
 }
 
 export interface UsbIpServerSettings {
+  backendMode: UsbBackendMode;
   host: string;
   port: number;
   autoRequestPermission: boolean;
   autoShare: boolean;
   maxClients: number;
   forceClaim: boolean;
+  retainClaimsOnStop: boolean;
 }
+
+export type UsbBackendMode = 'usbManager' | 'usbDdk';
 
 export interface UsbIpServerStatus {
   running: boolean;
@@ -68,6 +80,8 @@ export interface UsbIpServerStatus {
   port: number;
   clientCount: number;
   sharedDeviceIds: Array<string>;
+  occupiedDeviceIds: Array<string>;
+  listenerFamilies: Array<'IPv4' | 'IPv6'>;
   lastError: string;
 }
 

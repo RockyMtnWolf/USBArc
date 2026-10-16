@@ -23,13 +23,17 @@ function fixtureDevice(id: string): UsbDeviceInfo {
     deviceProtocol: 0,
     configurations: [],
     authorized: true,
+    occupied: false,
     shared: false,
+    imported: false,
+    closing: false,
     available: true
   };
 }
 
 function preferences(): UsbArcPreferencesData {
   return {
+    backendMode: 'usbManager',
     host: '0.0.0.0',
     port: 3240,
     autoRequestPermission: false,
@@ -37,7 +41,12 @@ function preferences(): UsbArcPreferencesData {
     autoShareScope: 'all',
     maxClients: 4,
     forceClaim: false,
+    retainClaimsOnStop: false,
     backgroundTaskMode: 'off',
+    themeMode: 'system',
+    tabBarStyle: 'material',
+    tabBarImagePath: '',
+    appBackgroundEnabled: false,
     rules: []
   };
 }
@@ -54,6 +63,24 @@ export default function UsbArcDevicePolicyTest() {
       policy.updateAttachment([]);
       expect(policy.updateAttachment([device]).has(device.id)).assertTrue();
       expect(policy.shouldRequestPermission(device.id, true, false)).assertTrue();
+    });
+
+    it('retries once after an explicit auto-permission re-enable but not on ordinary refresh', 0, () => {
+      const policy: UsbArcDevicePolicy = new UsbArcDevicePolicy();
+      const device: UsbDeviceInfo = fixtureDevice('1-2');
+      policy.updateAttachment([device]);
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertTrue();
+      // Refreshes during the same attachment do not repeatedly raise system prompts.
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertFalse();
+      // Re-enabling the setting is an explicit user action, so it may retry once.
+      policy.resetPermissionAttempt(device.id);
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertTrue();
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertFalse();
+      // A detach/reattach remains a fresh attachment and permits one new request.
+      policy.updateAttachment([]);
+      policy.updateAttachment([device]);
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertTrue();
+      expect(policy.shouldRequestPermission(device.id, true, false)).assertFalse();
     });
 
     it('matches all devices or only VID/PID/serial rules according to scope', 0, () => {

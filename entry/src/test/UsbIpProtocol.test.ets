@@ -20,10 +20,14 @@ import {
 import {
   beginUnlink,
   cancelAndClearPendingTransfers,
+  classifyUsbHandleCloseDisposition,
   classifyUnlinkTarget,
   completePendingTransfer,
   finishActiveUnlink,
+  isUsbDeviceExportable,
+  mergeUsbHandleRetention,
   PendingTransfer,
+  shouldRetainSharedUsbHandle,
   UsbIpServerService,
   usbIpSubmitDirection
 } from '../main/ets/services/UsbIpServer';
@@ -47,13 +51,13 @@ function makeSubmitHeader(direction: number, endpoint: number, transferLength: n
   return frame;
 }
 
-function testDevice(shared: boolean): UsbDeviceInfo {
+function testDevice(shared: boolean, occupied: boolean = true, closing: boolean = false): UsbDeviceInfo {
   return {
     id: 'test-device', name: 'Protocol fixture', path: '/usb/test/1', busId: '7-1',
     busNum: 7, devAddress: 1, vendorId: 0x1234, productId: 0xabcd, speed: 0,
     manufacturer: 'Fixture', product: 'Protocol fixture', serialNumber: '', version: '1.2',
     deviceClass: 0, deviceSubClass: 0, deviceProtocol: 0, configurations: [],
-    authorized: true, shared, available: true
+    authorized: true, occupied, shared, imported: false, closing, available: true
   };
 }
 
@@ -177,6 +181,33 @@ export default function UsbIpProtocolTest() {
       expect(reply[315]).assertEqual(0xcd);
       expect(reply[316]).assertEqual(0x01);
       expect(reply[317]).assertEqual(0x02);
+    });
+
+    it('exports a device only when shared, occupied, and not closing', 0, () => {
+      const service: UsbIpServerService = new UsbIpServerService();
+      const sharedAndClaimed: UsbDeviceInfo = testDevice(true, true, false);
+      const unshared: UsbDeviceInfo = testDevice(false, true, false);
+      const notClaimed: UsbDeviceInfo = testDevice(true, false, false);
+      const closing: UsbDeviceInfo = testDevice(true, true, true);
+      expect(isUsbDeviceExportable(sharedAndClaimed)).assertTrue();
+      expect(isUsbDeviceExportable(unshared)).assertFalse();
+      expect(isUsbDeviceExportable(notClaimed)).assertFalse();
+      expect(isUsbDeviceExportable(closing)).assertFalse();
+
+      const reply: Uint8Array = service.buildDeviceListReplyFor([unshared, notClaimed, closing, sharedAndClaimed]);
+      expect(readU32(reply, 8)).assertEqual(1);
+      expect(reply.length).assertEqual(324);
+    });
+
+    it('retains a selected claim after client disconnect only while the server runs', 0, () => {
+      expect(shouldRetainSharedUsbHandle(true, true, undefined)).assertTrue();
+      expect(shouldRetainSharedUsbHandle(false, true, undefined)).assertFalse();
+      expect(shouldRetainSharedUsbHandle(true, false, undefined)).assertFalse();
+      expect(shouldRetainSharedUsbHandle(true, true, false)).assertFalse();
+      expect(shouldRetainSharedUsbHandle(false, false, true)).assertFalse();
+      expect(mergeUsbHandleRetention(true, undefined)).assertTrue();
+      expect(mergeUsbHandleRetention(true, false)).assertFalse();
+      expect(mergeUsbHandleRetention(false, true)).assertFalse();
     });
 
     it('builds the IMPORT descriptor record at the protocol-defined offsets', 0, () => {
@@ -339,6 +370,13 @@ export default function UsbIpProtocolTest() {
       expect(active.state).assertEqual('complete');
       expect(control.cancelled).assertTrue();
       expect(control.state).assertEqual('complete');
+    });
+
+    it('retains a drained USB handle only when requested and quarantines an undrained handle', 0, () => {
+      expect(classifyUsbHandleCloseDisposition(true, true)).assertEqual('retain');
+      expect(classifyUsbHandleCloseDisposition(false, true)).assertEqual('release');
+      expect(classifyUsbHandleCloseDisposition(true, false)).assertEqual('quarantine');
+      expect(classifyUsbHandleCloseDisposition(false, false)).assertEqual('quarantine');
     });
   });
 }

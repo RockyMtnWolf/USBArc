@@ -22,6 +22,20 @@ struct StatusBarPage {
     });
   }
 
+  private exitApplication(): void {
+    const context = this.getUIContext().getHostContext() as common.UIExtensionContext | undefined;
+    if (context === undefined) {
+      return;
+    }
+    context.startAbility({
+      bundleName: 'io.github.rockymtnwolf.usbarc',
+      abilityName: 'EntryAbility',
+      parameters: { desktopTrayAction: 'exit' }
+    }).catch((error: BusinessError): void => {
+      hilog.warn(DOMAIN, TAG, 'Unable to exit USBArc. code=%{public}d', error.code ?? -1);
+    });
+  }
+
   build() {
     Column({ space: 16 }) {
       Text('USBArc')
@@ -29,6 +43,8 @@ struct StatusBarPage {
         .fontWeight(FontWeight.Medium)
       Button('打开 USBArc')
         .onClick((): void => this.openApplication())
+      Button('退出 USBArc')
+        .onClick((): void => this.exitApplication())
     }
     .width('100%')
     .height('100%')

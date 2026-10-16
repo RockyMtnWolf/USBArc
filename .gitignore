@@ -3,6 +3,7 @@
 /local.properties
 /build-profile.json5
 /.idea
+**/.idea/
 **/build
 /.hvigor
 .cxx
@@ -12,3 +13,10 @@
 **/.test
 /.appanalyzer
 /.cache
+/diagnosis/
+/USB_DDK_TestDebug.p7b
+/auto_debug_150086000135847784.cer.cer
+/ddk-driver/build-profile.json5
+**/node_modules/
+**/oh_modules/
+**/.hvigor/

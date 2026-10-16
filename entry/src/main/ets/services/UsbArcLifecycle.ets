@@ -4,8 +4,11 @@ import { sharedUsbArcController } from './UsbArcController';
 
 export class UsbArcLifecycle {
   static async exit(context: common.UIAbilityContext): Promise<void> {
-    await sharedUsbArcController.shutdown();
-    sharedDesktopTrayService.dispose(context);
-    await context.terminateSelf();
+    try {
+      await sharedUsbArcController.shutdown();
+    } finally {
+      sharedDesktopTrayService.dispose(context);
+      await context.terminateSelf();
+    }
   }
 }
