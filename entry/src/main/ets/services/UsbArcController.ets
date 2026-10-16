@@ -67,7 +67,7 @@ export class UsbArcController {
     this.unsubscribeBackground = this.backgroundTaskManager.subscribe((): void => this.publishBackgroundState());
     this.publishPreferences();
     this.publishBackgroundState();
-    UsbIpServer.updateSettings(UsbArcPreferences.toServerSettings(this.preferences));
+    await UsbIpServer.updateSettings(UsbArcPreferences.toServerSettings(this.preferences));
     this.unsubscribe = UsbIpServer.subscribe((event: UsbIpServerEvent): void => this.handleServerEvent(event));
     await this.subscribeUsbEvents(generation);
     if (this.shuttingDown || generation !== this.lifecycleGeneration) return;
@@ -117,7 +117,7 @@ export class UsbArcController {
     }
     try {
       if (!UsbIpServer.getStatus().running) {
-        UsbIpServer.updateSettings(UsbArcPreferences.toServerSettings(this.preferences));
+        await UsbIpServer.updateSettings(UsbArcPreferences.toServerSettings(this.preferences));
       }
       await UsbIpServer.start();
       this.updateServerStatus(UsbIpServer.getStatus());
@@ -166,10 +166,10 @@ export class UsbArcController {
       const backendModeChanged: boolean = merged.backendMode !== previous.backendMode;
       const autoRequestEnabled: boolean = merged.autoRequestPermission && !previous.autoRequestPermission;
       try {
-        // Persist only the fields represented by this request. The USB SDK update stays synchronous.
-        // If either operation fails, restore the old persisted/backend configuration.
+        // Persist only fields represented by this request, then await the backend transition.
+        // Auto-policy work is scheduled after persistence and does not occupy this queue.
         await UsbArcPreferences.save(context, merged);
-        this.updateBackendSettings(merged);
+        await this.updateBackendSettings(merged);
         this.preferences = UsbArcPreferences.copy(merged);
         this.publishPreferences();
         if (autoRequestEnabled) {
@@ -185,7 +185,7 @@ export class UsbArcController {
       } catch (error) {
         try {
           await UsbArcPreferences.save(context, previous);
-          this.updateBackendSettings(previous);
+          await this.updateBackendSettings(previous);
         } catch (_rollbackError) {
           // Keep the primary error visible; backend settings are restored whenever possible.
         }
@@ -314,7 +314,11 @@ export class UsbArcController {
       if (this.shuttingDown) {
         return false;
       }
-      this.setActionMessage(granted ? '系统已授权该USB设备。' : '尚未获得授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。');
+      const successMessage: string = this.preferences.backendMode === 'usbDdk' ?
+        'USB驱动已连接并初始化。' : '系统已授权该USB设备。';
+      this.setActionMessage(granted ? successMessage :
+        (this.preferences.backendMode === 'usbDdk' ? 'USB驱动尚未连接或初始化。' :
+          '尚未获得授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。'));
       await this.refresh();
       if (granted) {
         const device: UsbDeviceInfo | undefined = this.devices.find((item: UsbDeviceInfo): boolean => item.id === deviceId);
@@ -339,7 +343,8 @@ export class UsbArcController {
       return false;
     }
     if (!device.authorized) {
-      this.setActionMessage('请先通过系统弹窗授权此设备，再手动共享。');
+      this.setActionMessage(this.preferences.backendMode === 'usbDdk' ? '请先连接并初始化 USB 驱动，再共享此设备。' :
+        '请先通过系统弹窗授权此设备，再手动共享。');
       return false;
     }
     if (device.shared) {
@@ -556,11 +561,15 @@ export class UsbArcController {
             return;
           }
           if (!granted) {
-            this.setActionMessage(`尚未获得${this.deviceTitle(device)}的USB授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。`);
+            const pendingMessage: string = this.preferences.backendMode === 'usbDdk' ?
+              `USB 驱动尚未连接：${this.deviceTitle(device)}。` :
+              `尚未获得${this.deviceTitle(device)}的USB授权（可能仍在等待系统确认）；请完成系统弹窗后刷新设备列表。`;
+            this.setActionMessage(pendingMessage);
             continue;
           }
         } catch (error) {
-          this.setActionMessage(`请求${this.deviceTitle(device)}的USB授权失败：${this.errorMessage(error as Object)}`);
+          const action: string = this.preferences.backendMode === 'usbDdk' ? '连接 USB 驱动' : '请求 USB 授权';
+          this.setActionMessage(`${action}失败（${this.deviceTitle(device)}）：${this.errorMessage(error as Object)}`);
           continue;
         }
         const updated: UsbDeviceInfo | undefined = await this.findDevice(device.id);
@@ -618,7 +627,7 @@ export class UsbArcController {
     AppStorage.setOrCreate(DEVICES_KEY, this.devices.slice());
   }
 
-  private updateBackendSettings(next: UsbArcPreferencesData): void {
+  private async updateBackendSettings(next: UsbArcPreferencesData): Promise<void> {
     const desired: UsbIpServerSettings = UsbArcPreferences.toServerSettings(next);
     const current: UsbIpServerSettings = UsbIpServer.getSettings();
     const delta: Partial<UsbIpServerSettings> = {};
@@ -639,7 +648,7 @@ export class UsbArcController {
       delta.forceClaim === undefined && delta.retainClaimsOnStop === undefined) {
       return;
     }
-    UsbIpServer.updateSettings(delta);
+    await UsbIpServer.updateSettings(delta);
   }
 
   private updateServerStatus(status: UsbIpServerStatus): void {

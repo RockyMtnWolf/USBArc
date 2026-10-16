@@ -17,15 +17,21 @@ export interface UsbInterfaceInfo {
   clazz: number;
   subClass: number;
   alternateSetting: number;
+  /** DDK descriptor-order index required by OH_Usb_SelectInterfaceSetting. */
+  settingIndex?: number;
   endpoints: Array<UsbEndpointInfo>;
 }
 
 export interface UsbConfigurationInfo {
+  /** Physical configuration value exposed by the descriptor. */
   id: number;
+  /** Descriptor index used by DDK APIs; undefined for usbManager-only rows. */
+  index?: number;
   attributes: number;
   maxPower: number;
   interfaces: Array<UsbInterfaceInfo>;
-  raw: usbManager.USBConfiguration;
+  /** Present only for usbManager handles; DDK descriptors are never cast to manager objects. */
+  raw?: usbManager.USBConfiguration;
 }
 
 export interface UsbDeviceInfo {
@@ -41,14 +47,18 @@ export interface UsbDeviceInfo {
   speed: number;
   manufacturer: string;
   product: string;
-  /** Third-party apps cannot read serial via getDevices; empty unless the platform supplies it. */
+  /** Empty unless the selected backend exposes a readable USB serial descriptor. */
   serialNumber: string;
   version: string;
   deviceClass: number;
   deviceSubClass: number;
   deviceProtocol: number;
   configurations: Array<UsbConfigurationInfo>;
-  /** True only when usbManager.hasRight currently confirms device access. */
+  /** DDK DeviceManager ID. Undefined for usbManager devices. */
+  backendDeviceId?: number;
+  /** Opaque ID returned by OH_Usb_GetDevices. Undefined for usbManager devices. */
+  opaqueDeviceId?: string;
+  /** True only after the selected backend confirms access (manager right or initialized DDK binding). */
   authorized: boolean;
   /** True only while this app holds a claimed USB interface handle. */
   occupied: boolean;
@@ -94,13 +104,31 @@ export interface UsbIpServerEvent {
   status: UsbIpServerStatus;
 }
 
-export interface UsbDeviceHandle {
-  device: usbManager.USBDevice;
-  pipe: usbManager.USBDevicePipe;
+export interface UsbDeviceHandleBase {
   info: UsbDeviceInfo;
-  claimedInterfaces: Array<usbManager.USBInterface>;
   activeConfigurationId: number;
   activeAlternates: Map<number, number>;
+  claimedInterfaces: Array<number>;
+}
+
+export interface UsbManagerDeviceHandle extends UsbDeviceHandleBase {
+  backendMode: 'usbManager';
+  device: usbManager.USBDevice;
+  pipe: usbManager.USBDevicePipe;
+  claimedRawInterfaces: Array<usbManager.USBInterface>;
+}
+
+export interface UsbDdkDeviceHandle extends UsbDeviceHandleBase {
+  backendMode: 'usbDdk';
+  systemDeviceId: number;
+  opaqueDeviceId: string;
+  claimTokens: Map<number, string>;
+}
+
+export type UsbDeviceHandle = UsbManagerDeviceHandle | UsbDdkDeviceHandle;
+
+export function claimedInterfaceCount(handle: UsbDeviceHandle): number {
+  return handle.claimedInterfaces.length;
 }
 
 export interface UsbTransferResult {

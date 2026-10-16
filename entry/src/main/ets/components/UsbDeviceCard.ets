@@ -1,10 +1,11 @@
-import { UsbDeviceInfo } from '../usb/UsbModels';
+import { UsbBackendMode, UsbConfigurationInfo, UsbDeviceInfo, UsbInterfaceInfo } from '../usb/UsbModels';
 
 @Component
 export struct UsbDeviceCard {
   @Prop device: UsbDeviceInfo;
   @Prop busy: boolean = false;
   @Prop serverRunning: boolean = false;
+  @Prop backendMode: UsbBackendMode = 'usbManager';
   onPermission: (deviceId: string) => void = (_deviceId: string): void => {};
   onShare: (deviceId: string) => void = (_deviceId: string): void => {};
   onUnshare: (deviceId: string) => void = (_deviceId: string): void => {};
@@ -31,6 +32,11 @@ export struct UsbDeviceCard {
   }
 
   private deviceIcon(): Resource {
+    const hasStorageInterface: boolean = this.device.configurations.some((configuration: UsbConfigurationInfo): boolean =>
+      configuration.interfaces.some((usbInterface: UsbInterfaceInfo): boolean => usbInterface.clazz === 8));
+    if (this.device.deviceClass === 8 || hasStorageInterface) {
+      return $r('app.media.lucide_hard_drive');
+    }
     const identity: string = `${this.device.product} ${this.device.name} ${this.device.manufacturer}`.toLowerCase();
     if (identity.includes('sandisk') || identity.includes('flash') || identity.includes('disk') ||
       identity.includes('storage') || identity.includes('mass storage')) {
@@ -85,7 +91,9 @@ export struct UsbDeviceCard {
               (this.serverRunning && this.device.shared && this.device.occupied ? '#2432A978' :
                 (this.device.occupied ? '#243D82C4' : $r('sys.color.background_secondary'))))
             .borderRadius(16)
-          Text(this.device.authorized ? '已授权' : '未授权')
+          Text(this.backendMode === 'usbDdk' ?
+            (this.device.authorized ? '驱动已连接' : '驱动未连接') :
+            (this.device.authorized ? '已授权' : '未授权'))
             .fontSize(10)
             .fontColor(this.device.authorized ? '#FF68B8FF' : $r('sys.color.font_secondary'))
         }
@@ -110,8 +118,10 @@ export struct UsbDeviceCard {
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
         Column({ space: 4 }) {
-          Text('USB 地址').fontSize(11).fontColor($r('sys.color.font_secondary'))
-          Text(`总线 ${this.device.busNum} · 地址 ${this.device.devAddress}`)
+          Text(this.backendMode === 'usbDdk' ? '逻辑地址' : 'USB 地址')
+            .fontSize(11).fontColor($r('sys.color.font_secondary'))
+          Text(this.backendMode === 'usbDdk' ? this.device.busId :
+            `总线 ${this.device.busNum} · 地址 ${this.device.devAddress}`)
             .fontSize(13)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('sys.color.font_primary'))
@@ -136,7 +146,7 @@ export struct UsbDeviceCard {
 
       Row({ space: 8 }) {
         if (!this.device.authorized) {
-          Button(this.busy ? '处理中…' : '请求系统授权')
+          Button(this.busy ? '处理中…' : (this.backendMode === 'usbDdk' ? '连接 USB 驱动' : '请求系统授权'))
             .height(40)
             .enabled(!this.busy && !this.device.closing)
             .onClick((): void => this.onPermission(this.device.id))

@@ -274,7 +274,9 @@ struct Index {
     try {
       const granted: boolean = await sharedUsbArcController.requestPermission(deviceId);
       if (!granted) {
-        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage('尚未获得 USB 授权，请完成系统确认。') });
+        const fallback: string = this.preferences.backendMode === 'usbDdk' ?
+          'USB 驱动未能连接或初始化。' : '尚未获得 USB 授权，请完成系统确认。';
+        this.getUIContext().getPromptAction().showToast({ message: this.actionErrorMessage(fallback) });
       }
     } finally {
       this.removePendingDevice(deviceId);
@@ -467,7 +469,7 @@ struct Index {
               .fontSize(22)
               .fontWeight(FontWeight.Bold)
               .fontColor($r('sys.color.font_primary'))
-            Text('管理授权状态与远程共享')
+            Text(this.preferences.backendMode === 'usbDdk' ? '管理驱动连接与远程共享' : '管理授权状态与远程共享')
               .fontSize(13)
               .fontColor($r('sys.color.font_secondary'))
           }
@@ -498,7 +500,9 @@ struct Index {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('sys.color.font_primary'))
-              Text('支持 U 盘、J-Link、ST-Link、USB 转 TTL 与 CDC。设备接入后会显示在这里，授权由系统弹窗确认。')
+              Text(this.preferences.backendMode === 'usbDdk' ?
+                '设备接入后先显示为未连接；连接成功需驱动完成初始化和设备匹配。' :
+                '支持 U 盘、J-Link、ST-Link、USB 转 TTL 与 CDC。设备接入后会显示在这里，授权由系统弹窗确认。')
                 .fontSize(14)
                 .fontColor($r('sys.color.font_secondary'))
                 .maxLines(2)
@@ -519,6 +523,7 @@ struct Index {
                 UsbDeviceCard({
                   device: device,
                   serverRunning: this.serverStatus.running,
+                  backendMode: this.preferences.backendMode,
                   busy: this.pendingDeviceIds.includes(device.id),
                   onPermission: (deviceId: string): void => { void this.requestPermission(deviceId); },
                   onShare: (deviceId: string): void => { void this.shareDevice(deviceId); },
