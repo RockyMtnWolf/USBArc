@@ -236,6 +236,7 @@ export struct UsbArcSettings {
     }
     const next: UsbArcPreferencesData = UsbArcPreferences.copy(this.settings);
     next.backendMode = mode;
+    if (mode === 'usbDdk') next.forceClaim = false;
     await this.savePreferences(next);
   }
 
@@ -454,7 +455,8 @@ export struct UsbArcSettings {
             .fontSize(30)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('sys.color.font_primary'))
-          Text('管理 USB 授权、共享策略、网络与应用外观')
+          Text(this.settings.backendMode === 'usbDdk' ? '管理驱动连接、共享策略、网络与应用外观' :
+            '管理 USB 授权、共享策略、网络与应用外观')
             .fontSize(14)
             .fontColor($r('sys.color.font_secondary'))
         }
@@ -465,10 +467,13 @@ export struct UsbArcSettings {
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center, alignItems: ItemAlign.Start }) {
           Column({ space: 18 }) {
         Column({ space: 8 }) {
-          Text('自动授权请求').fontSize(18).fontWeight(FontWeight.Medium)
+          Text(this.settings.backendMode === 'usbDdk' ? '自动连接 USB 驱动' : '自动授权请求')
+            .fontSize(18).fontWeight(FontWeight.Medium)
           PreferenceSwitchRow({
-            title: '接入时请求系统授权',
-            description: '只请求系统USB权限，不会静默批准。系统拒绝后，本次接入不再重复弹窗；拔出再接入可重新请求。',
+            title: this.settings.backendMode === 'usbDdk' ? '接入时尝试连接驱动' : '接入时请求系统授权',
+            description: this.settings.backendMode === 'usbDdk' ?
+              '驱动初始化并匹配设备后才显示已连接。' :
+              '只请求系统USB权限，不会静默批准。系统拒绝后，本次接入不再重复弹窗；拔出再接入可重新请求。',
             checked: this.settings.autoRequestPermission,
             pending: this.isPreferencePending('autoRequestPermission'),
             onChange: (value: boolean): void => { void this.setBooleanPreference('autoRequestPermission', value); }
@@ -483,7 +488,7 @@ export struct UsbArcSettings {
 
         Column({ space: 8 }) {
           Text('USB 接口后端').fontSize(18).fontWeight(FontWeight.Medium)
-          Text('选择设备访问方式。USB Manager 是当前可用的通用后端。')
+          Text('选择 USB Manager 或 USB 驱动扩展。')
             .fontSize(12).fontColor($r('sys.color.font_secondary'))
           Row({ space: 8 }) {
             PreferenceOptionButton({
@@ -500,7 +505,7 @@ export struct UsbArcSettings {
             })
           }
           if (this.settings.backendMode === 'usbDdk') {
-            Text('此构建尚未接入可用于通用 USB/IP 的 DDK 驱动扩展。选择 DDK 后服务会明确报告不可用并拒绝启动，不会自动切回 USB Manager。')
+            Text('USB DDK 通过设备驱动扩展连接设备；驱动需已安装并完成系统授权。')
               .fontSize(12).fontColor($r('sys.color.font_secondary'))
           }
         }
@@ -515,9 +520,12 @@ export struct UsbArcSettings {
           Text('接口映射策略').fontSize(18).fontWeight(FontWeight.Medium)
           PreferenceSwitchRow({
             title: '强制接管 USB 接口',
-            description: '默认关闭。开启后USBArc会请求强制占用接口，可能影响本机正在使用该设备的软件。',
+            description: this.settings.backendMode === 'usbDdk' ?
+              'USB DDK 不支持强制接管；切换到 DDK 时已关闭此选项。' :
+              '默认关闭。开启后USBArc会请求强制占用接口，可能影响本机正在使用该设备的软件。',
             checked: this.settings.forceClaim,
             pending: this.isPreferencePending('forceClaim'),
+            toggleEnabled: this.settings.backendMode !== 'usbDdk',
             onChange: (value: boolean): void => { void this.setBooleanPreference('forceClaim', value); }
           })
           Row({ space: 8 }) {
@@ -605,7 +613,9 @@ export struct UsbArcSettings {
           Text('自动共享').fontSize(18).fontWeight(FontWeight.Medium)
           PreferenceSwitchRow({
             title: '自动共享符合条件的设备',
-            description: '仅在系统已授权后共享。Windows仍需使用usbip-win2主动连接。',
+            description: this.settings.backendMode === 'usbDdk' ?
+              '仅在驱动连接并完成初始化后共享。Windows 仍需使用 usbip-win2 主动连接。' :
+              '仅在系统已授权后共享。Windows 仍需使用 usbip-win2 主动连接。',
             checked: this.settings.autoShare,
             pending: this.isPreferencePending('autoShare'),
             onChange: (value: boolean): void => { void this.setBooleanPreference('autoShare', value); }
@@ -696,7 +706,7 @@ export struct UsbArcSettings {
           Text('停止服务时').fontSize(18).fontWeight(FontWeight.Medium)
           PreferenceSwitchRow({
             title: '停止后保持设备占用',
-            description: '关闭后停止服务会释放 USB 设备；下次启动时由客户端重新占用。',
+            description: '关闭后停止服务会释放 USB 设备；下次启动服务时重新占用。',
             checked: this.settings.retainClaimsOnStop,
             pending: this.isPreferencePending('retainClaimsOnStop'),
             onChange: (value: boolean): void => { void this.setBooleanPreference('retainClaimsOnStop', value); }

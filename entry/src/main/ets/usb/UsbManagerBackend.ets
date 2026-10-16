@@ -3,7 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import usbipNative from 'libusbip_native.so';
 import {
   UsbConfigurationInfo,
-  UsbDeviceHandle,
+  UsbManagerDeviceHandle,
   UsbDeviceInfo,
   UsbEndpointInfo,
   UsbInterfaceInfo,
@@ -93,7 +93,7 @@ function businessErrorCode(error: Object): number {
 }
 
 export class UsbManagerBackend {
-  private handles: Map<string, UsbDeviceHandle> = new Map<string, UsbDeviceHandle>();
+  private handles: Map<string, UsbManagerDeviceHandle> = new Map<string, UsbManagerDeviceHandle>();
   private closingIds: Set<string> = new Set<string>();
   private sharedIds: Set<string> = new Set<string>();
   private serialCache: Map<string, string> = new Map<string, string>();
@@ -107,7 +107,7 @@ export class UsbManagerBackend {
       info.serialNumber = this.serialCache.get(info.id) ?? info.serialNumber;
       info.speed = this.querySpeed(device);
       info.shared = this.sharedIds.has(info.id);
-      const heldHandle: UsbDeviceHandle | undefined = this.handles.get(info.id);
+      const heldHandle: UsbManagerDeviceHandle | undefined = this.handles.get(info.id);
       info.occupied = heldHandle !== undefined && heldHandle.claimedInterfaces.length > 0;
       info.closing = this.closingIds.has(info.id);
       info.available = true;
@@ -273,7 +273,7 @@ export class UsbManagerBackend {
     }
   }
 
-  async openForImport(deviceId: string, forceClaim: boolean = false): Promise<UsbDeviceHandle> {
+  async openForImport(deviceId: string, forceClaim: boolean = false): Promise<UsbManagerDeviceHandle> {
     if (!this.sharedIds.has(deviceId)) {
       throw new UsbBackendError('Device is not shared', -19);
     }
@@ -290,7 +290,7 @@ export class UsbManagerBackend {
       this.closeDevice(deviceId);
       throw new UsbBackendError('USB access permission is required', -13);
     }
-    const retainedHandle: UsbDeviceHandle | undefined = this.handles.get(deviceId);
+    const retainedHandle: UsbManagerDeviceHandle | undefined = this.handles.get(deviceId);
     if (retainedHandle !== undefined) {
       return retainedHandle;
     }
@@ -298,8 +298,8 @@ export class UsbManagerBackend {
     if (pipe === undefined) {
       throw new UsbBackendError('Could not open USB device pipe', -5);
     }
-    const handle: UsbDeviceHandle = {
-      device, pipe, info: mapDevice(device), claimedInterfaces: [],
+    const handle: UsbManagerDeviceHandle = {
+      backendMode: 'usbManager', device, pipe, info: mapDevice(device), claimedInterfaces: [], claimedRawInterfaces: [],
       activeConfigurationId: device.configs.length > 0 ? asNumber(device.configs[0].id) : 0,
       activeAlternates: new Map<number, number>()
     };
@@ -322,7 +322,8 @@ export class UsbManagerBackend {
           if (claimResult !== 0) {
             throw new UsbBackendError(`USB interface ${targetInfo.id} is busy (claim ${claimResult})`, -16);
           }
-          handle.claimedInterfaces.push(rawInterface);
+          handle.claimedRawInterfaces.push(rawInterface);
+          handle.claimedInterfaces.push(rawInterface.id);
           handle.activeAlternates.set(rawInterface.id, 0);
         }
       } catch (error) {
@@ -336,13 +337,13 @@ export class UsbManagerBackend {
     return handle;
   }
 
-  getHandle(deviceId: string): UsbDeviceHandle | undefined {
+  getHandle(deviceId: string): UsbManagerDeviceHandle | undefined {
     return this.handles.get(deviceId);
   }
 
   closeDevice(deviceId: string): void {
     if (this.closingIds.has(deviceId)) return;
-    const handle: UsbDeviceHandle | undefined = this.handles.get(deviceId);
+    const handle: UsbManagerDeviceHandle | undefined = this.handles.get(deviceId);
     if (handle !== undefined) {
       this.handles.delete(deviceId);
       this.releaseHandle(handle);
@@ -359,10 +360,10 @@ export class UsbManagerBackend {
     this.sharedIds.clear();
   }
 
-  private releaseHandle(handle: UsbDeviceHandle): void {
-    for (let index: number = handle.claimedInterfaces.length - 1; index >= 0; index--) {
+  private releaseHandle(handle: UsbManagerDeviceHandle): void {
+    for (let index: number = handle.claimedRawInterfaces.length - 1; index >= 0; index--) {
       try {
-        usbManager.releaseInterface(handle.pipe, handle.claimedInterfaces[index]);
+        usbManager.releaseInterface(handle.pipe, handle.claimedRawInterfaces[index]);
       } catch (_error) {
       }
     }
@@ -372,7 +373,7 @@ export class UsbManagerBackend {
     }
   }
 
-  startTransfer(handle: UsbDeviceHandle, endpointAddress: number, direction: number, data: Uint8Array,
+  startTransfer(handle: UsbManagerDeviceHandle, endpointAddress: number, direction: number, data: Uint8Array,
     expectedLength: number, timeout: number, transferFlags: number): UsbTransferOperation {
     const endpoint: UsbEndpointInfo | undefined = this.findEndpoint(handle, endpointAddress, direction);
     if (endpoint === undefined) {
@@ -454,7 +455,7 @@ export class UsbManagerBackend {
     return operation;
   }
 
-  async controlTransfer(handle: UsbDeviceHandle, setup: Uint8Array, payload: Uint8Array,
+  async controlTransfer(handle: UsbManagerDeviceHandle, setup: Uint8Array, payload: Uint8Array,
     length: number, direction: number, timeout: number): Promise<UsbControlTransferResult> {
     const buffer: Uint8Array = direction === 1 ? new Uint8Array(length) : payload;
     const request: usbManager.USBDeviceRequestParams = {
@@ -475,36 +476,41 @@ export class UsbManagerBackend {
     }
   }
 
-  setConfiguration(handle: UsbDeviceHandle, value: number, forceClaim: boolean = false): number {
+  setConfiguration(handle: UsbManagerDeviceHandle, value: number, forceClaim: boolean = false): number {
     const config: UsbConfigurationInfo | undefined = handle.info.configurations.find((item: UsbConfigurationInfo): boolean => item.id === value);
     if (config === undefined) {
       return -22;
     }
-    handle.claimedInterfaces.forEach((iface: usbManager.USBInterface) => {
+    const rawConfig: usbManager.USBConfiguration | undefined = config.raw;
+    if (rawConfig === undefined) return -95;
+    handle.claimedRawInterfaces.forEach((iface: usbManager.USBInterface) => {
       try { usbManager.releaseInterface(handle.pipe, iface); } catch (_error) { }
     });
+    handle.claimedRawInterfaces = [];
     handle.claimedInterfaces = [];
     handle.activeAlternates.clear();
-    const result: number = usbManager.setConfiguration(handle.pipe, config.raw);
+    const result: number = usbManager.setConfiguration(handle.pipe, rawConfig);
     if (result !== 0) return this.mapUsbError(result);
     handle.activeConfigurationId = config.id;
     let claimFailed: boolean = false;
     const claimedIds: Set<number> = new Set<number>();
-    config.raw.interfaces.forEach((iface: usbManager.USBInterface) => {
+    rawConfig.interfaces.forEach((iface: usbManager.USBInterface) => {
       if (claimFailed || iface.alternateSetting !== 0 || claimedIds.has(iface.id)) return;
       const claimResult: number = usbManager.claimInterface(handle.pipe, iface, forceClaim);
       if (claimResult !== 0) {
         claimFailed = true;
         return;
       }
-      handle.claimedInterfaces.push(iface);
+      handle.claimedRawInterfaces.push(iface);
+      handle.claimedInterfaces.push(iface.id);
       handle.activeAlternates.set(iface.id, 0);
       claimedIds.add(iface.id);
     });
     if (claimFailed) {
-      handle.claimedInterfaces.forEach((iface: usbManager.USBInterface) => {
+      handle.claimedRawInterfaces.forEach((iface: usbManager.USBInterface) => {
         try { usbManager.releaseInterface(handle.pipe, iface); } catch (_error) { }
       });
+      handle.claimedRawInterfaces = [];
       handle.claimedInterfaces = [];
       handle.activeAlternates.clear();
       return -16;
@@ -512,7 +518,7 @@ export class UsbManagerBackend {
     return 0;
   }
 
-  setAlternate(handle: UsbDeviceHandle, interfaceId: number, alternate: number): number {
+  setAlternate(handle: UsbManagerDeviceHandle, interfaceId: number, alternate: number): number {
     const activeConfig: usbManager.USBConfiguration | undefined = handle.device.configs.find(
       (config: usbManager.USBConfiguration): boolean => config.id === handle.activeConfigurationId
     );
@@ -525,14 +531,15 @@ export class UsbManagerBackend {
     }
     const result: number = usbManager.setInterface(handle.pipe, iface);
     if (result === 0) {
-      handle.claimedInterfaces = handle.claimedInterfaces.filter((item: usbManager.USBInterface): boolean => item.id !== interfaceId);
-      handle.claimedInterfaces.push(iface);
+      handle.claimedRawInterfaces = handle.claimedRawInterfaces.filter((item: usbManager.USBInterface): boolean => item.id !== interfaceId);
+      handle.claimedRawInterfaces.push(iface);
+      if (!handle.claimedInterfaces.includes(interfaceId)) handle.claimedInterfaces.push(interfaceId);
       handle.activeAlternates.set(interfaceId, alternate);
     }
     return result === 0 ? 0 : this.mapUsbError(result);
   }
 
-  findEndpoint(handle: UsbDeviceHandle, endpointNumber: number, direction: number): UsbEndpointInfo | undefined {
+  findEndpoint(handle: UsbManagerDeviceHandle, endpointNumber: number, direction: number): UsbEndpointInfo | undefined {
     let found: UsbEndpointInfo | undefined = undefined;
     const config: UsbConfigurationInfo | undefined = handle.info.configurations.find(
       (item: UsbConfigurationInfo): boolean => item.id === handle.activeConfigurationId
@@ -563,7 +570,7 @@ export class UsbManagerBackend {
     const cached: number | undefined = this.speedCache.get(id);
     if (cached !== undefined) return cached;
     if (!usbManager.hasRight(device.name)) return 0;
-    const existing: UsbDeviceHandle | undefined = this.handles.get(id);
+    const existing: UsbManagerDeviceHandle | undefined = this.handles.get(id);
     if (existing !== undefined) {
       const activeSpeed: number = this.queryPipeSpeed(existing.pipe);
       this.speedCache.set(id, activeSpeed);

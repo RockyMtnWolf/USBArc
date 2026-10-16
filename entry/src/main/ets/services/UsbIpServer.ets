@@ -1,4 +1,4 @@
-import { BusinessError, usbManager } from '@kit.BasicServicesKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { socket } from '@kit.NetworkKit';
 import usbipNative from 'libusbip_native.so';
 import {
@@ -11,7 +11,8 @@ import {
   UsbIpServerSettings,
   UsbIpServerStatus
 } from '../usb/UsbModels';
-import { UsbBackendError, UsbManagerBackend } from '../usb/UsbManagerBackend';
+import { UsbBackendError } from '../usb/UsbManagerBackend';
+import { UsbBackendCoordinator } from '../usb/UsbBackendCoordinator';
 import {
   MAX_DEVICE_COUNT,
   MAX_INTERFACES,
@@ -199,11 +200,11 @@ const URB_DIR_IN: number = 0x0200;
 const TRANSFER_DRAIN_TIMEOUT_MS: number = 7000;
 
 /**
- * USB/IP 1.1.1 exporter backed by the API 18+ usbManager asynchronous transfer API.
+ * USB/IP 1.1.1 exporter routed to the explicitly selected USB backend.
  * UI policy is deliberately explicit: listDevices never requests rights or shares devices.
  */
 export class UsbIpServerService {
-  private readonly backend: UsbManagerBackend = new UsbManagerBackend();
+  private readonly backend: UsbBackendCoordinator = new UsbBackendCoordinator();
   private settings: UsbIpServerSettings = {
     backendMode: DEFAULT_SETTINGS.backendMode,
     host: DEFAULT_SETTINGS.host, port: DEFAULT_SETTINGS.port,
@@ -222,13 +223,11 @@ export class UsbIpServerService {
   private deviceRefreshQueue: Promise<void> = Promise.resolve();
 
   async listDevices(): Promise<Array<UsbDeviceInfo>> {
-    if (this.settings.backendMode === 'usbDdk') return [];
     await this.backend.refreshMetadata();
     return this.overlayImportState(this.backend.listDevices());
   }
 
   async refreshDevices(): Promise<Array<UsbDeviceInfo>> {
-    if (this.settings.backendMode === 'usbDdk') return [];
     let snapshot: Array<UsbDeviceInfo> = [];
     const refreshWork: Promise<void> = this.deviceRefreshQueue.then(async (): Promise<void> => {
       snapshot = await this.refreshDevicesInternal();
@@ -241,14 +240,13 @@ export class UsbIpServerService {
   }
 
   async requestPermission(deviceId: string): Promise<boolean> {
-    this.requireUsbManagerBackend('request permission');
     const granted: boolean = await this.backend.requestPermission(deviceId);
-    this.publish('devices', granted ? 'USB permission granted' : 'USB permission denied');
+    this.publish('devices', granted ? (this.settings.backendMode === 'usbDdk' ?
+      'DDK driver bound and initialized' : 'USB permission granted') : 'USB permission was not confirmed');
     return granted;
   }
 
   async share(deviceId: string): Promise<void> {
-    this.requireUsbManagerBackend('share a device');
     this.backend.addShared(deviceId);
     try {
       const handle: UsbDeviceHandle = await this.backend.openForImport(deviceId, this.settings.forceClaim);
@@ -256,8 +254,8 @@ export class UsbIpServerService {
         throw new UsbBackendError('USB device has no interface that can be claimed; it was not marked shared', -95);
       }
     } catch (error) {
-      this.backend.removeShared(deviceId);
-      this.backend.closeDevice(deviceId);
+      await this.backend.removeShared(deviceId);
+      await this.backend.closeDevice(deviceId);
       if (error instanceof UsbBackendError) throw error;
       if (error instanceof Error) throw new UsbBackendError(error.message, -5);
       throw new UsbBackendError('USB device share failed', -5);
@@ -266,30 +264,33 @@ export class UsbIpServerService {
   }
 
   async unshare(deviceId: string): Promise<void> {
-    this.requireUsbManagerBackend('unshare a device');
+    let connectionError: Error | undefined = undefined;
     const owner: number | undefined = this.importedOwners.get(deviceId);
     if (owner !== undefined) {
       const state: ConnectionState | undefined = this.connections.get(owner);
       if (state !== undefined) {
-        await this.closeConnection(state, 'USB device unshared', false);
+        try { await this.closeConnection(state, 'USB device unshared', false); }
+        catch (error) { connectionError = error instanceof Error ? error : new UsbBackendError('Client cleanup failed', -16); }
       }
     }
-    this.backend.removeShared(deviceId);
-    this.backend.closeDevice(deviceId);
+    await this.backend.removeShared(deviceId);
+    try {
+      await this.backend.closeDevice(deviceId);
+    } catch (error) {
+      if (error instanceof UsbBackendError) throw error;
+      throw new UsbBackendError(error instanceof Error ? error.message : 'USB handle release failed', -16);
+    }
+    this.backend.clearDeviceClosing(deviceId);
     this.publish('devices', `Unshared USB device ${deviceId}`);
+    if (connectionError !== undefined) this.lastError = connectionError.message;
   }
 
   async start(settings?: Partial<UsbIpServerSettings>): Promise<void> {
     if (settings !== undefined) {
-      this.updateSettings(settings);
+      await this.updateSettings(settings);
     }
     if (this.running) {
       return;
-    }
-    if (this.settings.backendMode === 'usbDdk') {
-      this.lastError = 'DDK mode is selected, but the USBArc DDK driver is not connected. USB/IP was not started; no usbManager fallback was used.';
-      this.publish('error', this.lastError);
-      throw new Error(this.lastError);
     }
     const server: socket.TCPSocketServer = socket.constructTCPSocketServerInstance();
     try {
@@ -320,7 +321,7 @@ export class UsbIpServerService {
           throw new UsbBackendError('Device has no claimable USB interface', -95);
         }
       } catch (error) {
-        this.backend.closeDevice(sharedIds[index]);
+        await this.backend.closeDevice(sharedIds[index]);
         claimFailures.push(`${sharedIds[index]}: ${this.errorMessage(error as Object)}`);
       }
     }
@@ -343,12 +344,31 @@ export class UsbIpServerService {
       try { await server.close(); } catch (_error) { }
     }
     const clients: Array<ConnectionState> = Array.from(this.connections.values());
-    await Promise.all(clients.map((state: ConnectionState): Promise<void> =>
-      this.closeConnection(state, 'USB/IP server stopped', this.settings.retainClaimsOnStop)));
-    if (this.settings.backendMode === 'usbManager' && !this.settings.retainClaimsOnStop) {
-      this.backend.closeAll();
+    let cleanupFailure: Error | undefined = undefined;
+    for (let index: number = 0; index < clients.length; index++) {
+      try {
+        await this.closeConnection(clients[index], 'USB/IP server stopped', this.settings.retainClaimsOnStop);
+      } catch (error) {
+        if (cleanupFailure === undefined) {
+          cleanupFailure = error instanceof Error ? error : new UsbBackendError('Client cleanup failed', -16);
+        }
+      }
+    }
+    if (!this.settings.retainClaimsOnStop) {
+      try { await this.backend.closeAll(); }
+      catch (error) {
+        if (cleanupFailure === undefined) {
+          cleanupFailure = error instanceof Error ? error : new UsbBackendError('USB handle cleanup failed', -16);
+        }
+      }
     }
     this.listenerFamilies = [];
+    if (cleanupFailure !== undefined) {
+      this.lastError = `USB/IP server stopped, but USB claims remain occupied: ${this.errorMessage(cleanupFailure as Object)}`;
+      this.publish('error', this.lastError);
+      this.publish('status', 'USB/IP server stopped with cleanup failures');
+      return;
+    }
     this.publish('status', 'USB/IP server stopped');
   }
 
@@ -363,7 +383,7 @@ export class UsbIpServerService {
     return copy;
   }
 
-  updateSettings(settings: Partial<UsbIpServerSettings>): void {
+  async updateSettings(settings: Partial<UsbIpServerSettings>): Promise<void> {
     const next: UsbIpServerSettings = {
       backendMode: settings.backendMode ?? this.settings.backendMode,
       host: settings.host ?? this.settings.host,
@@ -390,7 +410,7 @@ export class UsbIpServerService {
       throw new Error('Maximum client count must be in the range 1 to 32');
     }
     if (!this.running && next.backendMode !== this.settings.backendMode) {
-      this.backend.clearSharedAndCloseAll();
+      await this.backend.setMode(next.backendMode);
       this.importedOwners.clear();
     }
     this.settings = next;
@@ -403,11 +423,11 @@ export class UsbIpServerService {
       host: this.settings.host,
       port: this.settings.port,
       clientCount: this.importedOwners.size,
-      sharedDeviceIds: this.running && this.settings.backendMode === 'usbManager' ?
+      sharedDeviceIds: this.running ?
         this.backend.listDevices().filter((item: UsbDeviceInfo): boolean => isUsbDeviceExportable(item))
           .map((item: UsbDeviceInfo): string => item.id) : [],
-      occupiedDeviceIds: this.settings.backendMode === 'usbManager' ?
-        this.backend.listDevices().filter((item: UsbDeviceInfo): boolean => item.occupied).map((item: UsbDeviceInfo): string => item.id) : [],
+      occupiedDeviceIds: this.backend.listDevices().filter((item: UsbDeviceInfo): boolean => item.occupied)
+        .map((item: UsbDeviceInfo): string => item.id),
       listenerFamilies: this.listenerFamilies.slice(),
       lastError: this.lastError
     };
@@ -725,11 +745,11 @@ export class UsbIpServerService {
       const value: number = setup.value;
       const index: number = setup.index;
       if ((requestType & 0x7f) === 0 && requestCode === 9) {
-        const result: number = this.backend.setConfiguration(handle, value, this.settings.forceClaim);
+        const result: number = await this.backend.setConfiguration(handle, value, this.settings.forceClaim);
         return this.buildSubmitReply(request, result === 0 ? 0 : result, 0, new Uint8Array(0));
       }
       if ((requestType & 0x7f) === 1 && requestCode === 11) {
-        const result: number = this.backend.setAlternate(handle, index, value);
+        const result: number = await this.backend.setAlternate(handle, index, value);
         return this.buildSubmitReply(request, result === 0 ? 0 : result, 0, new Uint8Array(0));
       }
       const result = await this.backend.controlTransfer(handle, request.setup, request.payload, length,
@@ -834,6 +854,7 @@ export class UsbIpServerService {
     if (state.importedDeviceId.length > 0) this.backend.markDeviceClosing(state.importedDeviceId);
     cancelAndClearPendingTransfers(state.pending);
     const drained: boolean = await this.waitForTransferDrain(state);
+    let cleanupError: Error | undefined = undefined;
     if (state.importedDeviceId.length > 0) {
       const deviceId: string = state.importedDeviceId;
       const retainDeviceHandle: boolean = shouldRetainSharedUsbHandle(this.running, this.backend.isShared(deviceId),
@@ -841,15 +862,30 @@ export class UsbIpServerService {
       const disposition: UsbHandleCloseDisposition = classifyUsbHandleCloseDisposition(retainDeviceHandle, drained);
       this.importedOwners.delete(deviceId);
       if (disposition !== 'quarantine') {
-        this.backend.clearDeviceClosing(deviceId);
-        if (disposition === 'release') this.backend.closeDevice(deviceId);
+        if (disposition === 'release') {
+          try {
+            await this.backend.closeDevice(deviceId);
+            this.backend.clearDeviceClosing(deviceId);
+          } catch (error) {
+            cleanupError = error instanceof Error ? error : new UsbBackendError('USB handle release failed', -16);
+            this.lastError = `USB device ${deviceId} release failed; its claim remains occupied: ${this.errorMessage(cleanupError as Object)}`;
+            this.publish('error', this.lastError);
+          }
+        } else {
+          this.backend.clearDeviceClosing(deviceId);
+        }
       } else {
         this.lastError = `USB device ${deviceId} is quarantined until its previous transfer completes; its claim will not be reused.`;
         const tails: Array<Promise<void>> = Array.from(state.endpointTails.values());
-        void Promise.all(tails).then((): void => {
-          this.backend.clearDeviceClosing(deviceId);
-          this.backend.closeDevice(deviceId);
-          this.publish('devices', `USB device ${deviceId} transfer drain completed and its claim was released`);
+        void Promise.all(tails).then(async (): Promise<void> => {
+          try {
+            await this.backend.closeDevice(deviceId);
+            this.backend.clearDeviceClosing(deviceId);
+            this.publish('devices', `USB device ${deviceId} transfer drain completed and its claim was released`);
+          } catch (error) {
+            this.lastError = `USB device ${deviceId} release failed after transfer drain: ${this.errorMessage(error as Object)}`;
+            this.publish('error', this.lastError);
+          }
         });
       }
       state.importedDeviceId = '';
@@ -858,6 +894,7 @@ export class UsbIpServerService {
     try { await state.socket.close(); } catch (_error) { }
     this.connections.delete(state.socket.clientId);
     this.publish('client', reason);
+    if (cleanupError !== undefined) throw cleanupError;
   }
 
   private async waitForTransferDrain(state: ConnectionState): Promise<boolean> {
@@ -885,41 +922,33 @@ export class UsbIpServerService {
   }
 
   private async refreshDevicesInternal(): Promise<Array<UsbDeviceInfo>> {
-    if (this.settings.backendMode === 'usbDdk') return [];
     await this.backend.refreshMetadata();
-    const removed: Array<string> = this.backend.pruneMissingDevices();
+    const removed: Array<string> = await this.backend.pruneMissingDevices();
     for (let index: number = 0; index < removed.length; index++) {
       const deviceId: string = removed[index];
       const owner: number | undefined = this.importedOwners.get(deviceId);
       if (owner !== undefined) {
         const state: ConnectionState | undefined = this.connections.get(owner);
         if (state !== undefined) await this.closeConnection(state, `USB device ${deviceId} disconnected`);
-        else this.backend.closeDevice(deviceId);
+        else await this.backend.closeDevice(deviceId);
       } else {
-        this.backend.closeDevice(deviceId);
+        await this.backend.closeDevice(deviceId);
       }
     }
     return this.backend.listDevices();
   }
 
   private currentDevices(): Array<UsbDeviceInfo> {
-    return this.settings.backendMode === 'usbManager' ? this.overlayImportState(this.backend.listDevices()) : [];
+    return this.overlayImportState(this.backend.listDevices());
   }
 
   private overlayImportState(devices: Array<UsbDeviceInfo>): Array<UsbDeviceInfo> {
     devices.forEach((device: UsbDeviceInfo): void => {
       device.imported = this.importedOwners.has(device.id);
       device.closing = this.backend.isDeviceClosing(device.id);
-      device.available = true;
+      device.available = !device.closing;
     });
     return devices;
-  }
-
-  private requireUsbManagerBackend(operation: string): void {
-    if (this.settings.backendMode !== 'usbDdk') return;
-    this.lastError = `Cannot ${operation}: DDK mode is selected but its driver bridge is not available. No usbManager fallback was used.`;
-    this.publish('error', this.lastError);
-    throw new Error(this.lastError);
   }
 
   private errorMessage(error: Object): string {
