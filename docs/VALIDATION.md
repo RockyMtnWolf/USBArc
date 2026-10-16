@@ -1,42 +1,43 @@
 # Validation Record
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16 11:33 (Asia/Shanghai)
 
-This record separates source-level protocol evidence, DevEco build evidence, device behavior, and Windows USB/IP interoperability. A passing build does not imply device or client interoperability.
+This record distinguishes local USB/IP listener checks from remote transport and USB device operations. DDK binding and read-only descriptor/configuration queries succeeded; storage interfaces were not claimed and no storage device was imported, attached, or used for data I/O.
 
-## Environment
+## Environment and build
 
 | Item | Observed state |
 |---|---|
-| DevEco Studio | 26.0.0.851 |
-| HarmonyOS SDK | API 26, 26.0.0.105 Release |
-| DevEco CLI | 1.3.4 |
-| Connected target | HUAWEI MateBook Pro S, 2in1, API 26; HDC connection confirmed |
-| USB/IP Windows client | `C:\Program Files\USBip\usbip.exe` is installed; version 0.9.8.1; `list --help` confirms remote DEVLIST support |
-| USB/IP host driver | Present and OK: USBip 3.X Emulated Host Controller; provider USBIP-WIN2, version 12.1.30.403, service `usbip2_ude` |
-| Debug signing | USBArc-specific debug signing generation succeeded through `devecocli signature generate --product default`; local `build-profile.json5` is ignored by Git |
-
-The Windows host's latest read-only inventory showed no CH343, CH340, CP2102, CH347, ST-Link, or USB mass-storage device; the host's four listed disks are fixed internal disks. A read-only MateBook inventory showed CH340 (`1A86:7523`), CP2102 (`10C4:EA60`), CH343 (`1A86:55D3`), CH347-family (`1A86:55DB`), ST-Link V2 (`0483:3748`), ST-Link V3 (`0483:374E`), SanDisk storage (`0781:5591`), and USBasp (`16C0:05DC`). These are on the HarmonyOS MateBook, not the Windows host. The current app card reports the CH343 as authorized; no transfer, claim, share, attach, or write has been performed. An earlier CH343 permission request returned `true` while the card still showed unauthorized and no system dialog was visible. That discrepancy later cleared, but its cause remains unknown; the request result alone did not establish a grant, and no source-backed root cause has been confirmed.
-
-A read-only `ifconfig -a` on the MateBook reported `wlan0` UP/RUNNING at `192.168.112.143/24` (the current HDC route), `ancowlan0` UP/RUNNING at `172.17.1.1/24`, and loopback at `127.0.0.1`; `p2p0` and `chba0` were UP without an IPv4 `inet` field. No interface output included an `inet6` address. The device's `ip` command was unavailable and `/proc/net/if_inet6` was denied, so the IPv6 inventory is inconclusive. The candidate app has not yet displayed the new address service; after deployment, its address list will be compared against these real IPv4 values and the native/API IPv6 results.
+| Target | HUAWEI MateBook Pro S, 2in1, HarmonyOS API 26; HDC target `100.116.69.50:37727` |
+| App snapshot used for the 11:32 device observation | Main app build based on checkpoint `0845c6e` with DDK integration; user selected USB DDK and automatic authorization. The UI listed two devices, `0781:5591` and `0BDA:9210`, both “driver connected / idle”; shared count was 0. |
+| Final source verification | Local Test 39/39; official lint 0 errors and 4 custom-component reuse warnings; full signed debug build succeeded at 11:33. |
+| Final installation | The signed HAP with DDK health checks and address fallback installed and launched successfully; CLI Smoke PASS. Runtime layout and the reviewed screenshot confirm actual addresses and both listener labels. |
 
 ## Results
 
-| Area | Result | Evidence / limit |
+| Area | Result | Evidence and limits |
 |---|---|---|
-| Independent protocol, device-policy, and local-network tests against production functions | Pass, 22/22 | `entry/.test/default/intermediates/test/coverage_data/test_result.txt`: 15 `UsbIpProtocolTest` + 3 `UsbArcDevicePolicyTest` + 4 `LocalNetworkAddressesTest`, 0 failures/errors. The network tests cover production IPv4/IPv6 normalization, link-local scope, unspecified-address filtering, loopback retention, and duplicate rows from native/NetworkKit sources. |
-| `devecocli check lint entry --product default` | Pass with one warning | 0 errors; one style warning in `components/UsbDeviceCard.ets` preferring `@Builder` over a custom component. |
-| `devecocli build --modules entry --build-mode debug` | Pass for current deployed address UI snapshot | Native CMake/Ninja and ArkTS completed; HAP was signed with USBArc-specific local debug credentials. This snapshot predates the latest request to limit the address section to `wlan0`, change background-task controls, remove Exit, and auto-refresh on USB attach/detach; rebuild/review is pending those changes. Warnings include CMake minimum-version deprecation, future NAPI verification for `libusbip_native.so`, and ArkTS exception-handling advisories. |
-| MateBook install and UI view | Pass, current installed snapshot | `devecocli run --skip-build` installed and launched `io.github.rockymtnwolf.usbarc/EntryAbility`; safe maximized main screenshot: `docs/evidence/matebook-main-addresses-20261015.png`. It showed 3 IPv4 rows and 4 IPv6 rows, with IPv6 marked display-only because the server listens on IPv4. The UI was approved; next snapshot will show only `wlan0` per the latest requirement. Settings screenshot is intentionally pending the new UI revision. |
-| USB device authorization and descriptor export | CH343 authorized in UI; export not tested | The current card reports CH343 authorized after the earlier request/refresh discrepancy. This is authorization state only; no descriptor export or USB claim/share was attempted. The original mismatch's cause is unknown. |
-| MateBook USB enumeration | Pass, read-only | Eight devices appeared on the current main page, including USBasp. Inventory only; SanDisk was not imported or attached; ST-Link devices were not flashed; no serial data was sent. |
-| Windows `usbip list` / DEVLIST | Not tested | Client and driver are installed. Physical devices are available on the MateBook but absent from the Windows host; the USB/IP server has not yet been verified with a shared device. A fragmented raw DEVLIST probe is available in `scripts/tests/probe-fragmented-devlist.ps1`. |
-| Windows IMPORT / attach / actual device I/O / detach | Not tested | MateBook devices are present, but authorization/share has not been confirmed. The SanDisk disk remains excluded from import/attach; ST-Link devices will not be flashed and no serial payload will be sent. |
-| Background task, tray registration, window-close recovery | Pending | Must be observed on the MateBook after visual review; short observation does not establish permanent background survival. |
+| Protocol, device-policy, network-address, and DDK Local Tests | Pass, 39/39 | Latest main-tree Local Test report. Includes the listener-label regression where stale `serverReachable=false` is overridden by the live server state and actual listener-family list. |
+| ArkTS lint | Pass with warnings | 0 errors; 4 warnings recommend `@Builder` instead of custom components. |
+| Full debug build | Pass | Final build at 11:33 succeeded and produced a signed HAP. |
+| MateBook device snapshot | Pass, read-only | Two devices were listed in the USB DDK UI, both idle and driver-connected; shared count was 0. This did not test transfer, import, claim, or storage access. |
+| Listener socket families | Pass, local observation | While the test service was running on TCP port 3240, `netstat` showed `[::]:3240` listening; IPv4-mapped connections were accepted. This records the bound socket family, not remote IPv6 reachability over every interface. |
+| IPv4 loopback DEVLIST | Pass | A system `toybox nc` probe sent `01 11 80 05 00 00 00 00` to `127.0.0.1:3240` and received exactly `01 11 00 05 00 00 00 00 00 00 00 00` (successful DEVLIST, zero devices). |
+| IPv6 loopback DEVLIST | Pass | The same 8-byte request to numeric `::1:3240` received the same exact 12-byte empty DEVLIST response. An independently compiled native probe was denied execution and was not counted as successful; the successful evidence is from the system `toybox nc` fallback. |
+| Windows IPv4 USB/IP DEVLIST | Pass, zero devices | The fragmented DEVLIST probe to `100.116.69.50:3240` completed successfully with device count 0. No IMPORT was sent. |
+| Windows Tailnet IPv6 | Not connected | A connection attempt to `fd7a:115c:a1e0::8a3b:4533:3240` timed out. This is a Tailnet IPv6 transport result, not evidence that the MateBook's native IPv6 listener failed; local `::1` listener and DEVLIST checks passed. |
+| DDK binding and metadata | Pass for the two listed devices | Driver-connected state is published only after binding, initialization health, unambiguous opaque ID matching, descriptor reads and GET_CONFIGURATION succeed. This does not prove claim or transfer compatibility. |
+| Interface claim, import, attach, or device I/O | Not tested | No USB/IP IMPORT or attach was sent. No storage interface was claimed and no storage data was read or written. |
+| Screenshot review | Pass for current address correction | Root reviewed `evidence/matebook-active-network-20261016.png`: maximized USBArc, actual virnic4 IPv4 and scoped IPv6, both listening labels, two equal idle DDK cards and shared count 0. |
 
-## Protocol checks
+## Address display note
 
-The independent suite calls exported production code and compares behavior with the [Linux kernel USB/IP protocol specification](https://docs.kernel.org/usb/usbip_protocol.html). It includes fixed wire-byte expectations as well as stream and session behavior, so it does not rely only on encode/decode round trips.
+At the time of the latest address check, `wlan0` had no address. The active virtual interface reported IPv4 `10.47.56.82`. Do not reuse older screenshots or addresses as current network state. The approved display behavior is to prefer `wlan0` addresses and, when it has none, show the actual default physical interface selected from NetworkKit/interface metadata with its interface name; it must not guess an address.
 
-The test source covers network byte order, fragmented and coalesced TCP frames, maximum and oversized transfer lengths, non-ISO `number_of_packets` values `0` and `0xffffffff` (`-1`), invalid direction/endpoint and ISO rejection, the actual GET_DESCRIPTOR setup packet's little-endian fields, DEVLIST/IMPORT descriptor offsets, server response basic-header fields, pending-transfer disconnect cleanup, and UNLINK queued/active/completion races. Successful cancellation returns `USBIP_RET_UNLINK` status `-104` and suppresses the original submit reply; an already-completed or absent target returns status `0`. Queued control transfers are cancelled before execution; running control transfers return `-EOPNOTSUPP`. A final source-level case checks that USB/IP header direction drives transfer direction even when `URB_DIR_IN` is absent from `transferFlags`.
+## Protocol scope
 
+Tests call exported production functions and compare fixed wire bytes as well as state transitions; they do not rely only on encoder/decoder round trips. The protocol suite covers network byte order, fragmented and coalesced frames, transfer bounds, non-ISO packet markers `0` and `0xffffffff`, invalid direction/endpoint and ISO rejection, the USB GET_DESCRIPTOR setup packet's little-endian fields, DEVLIST/IMPORT descriptors, response headers, pending-transfer cleanup, and UNLINK cancellation races. The protocol reference is the [Linux kernel USB/IP specification](https://docs.kernel.org/usb/usbip_protocol.html).
+
+The runtime network checks were limited to empty DEVLIST requests. The earlier service was stopped before installing the final package, then restarted with automatic sharing off for the final check. Both numeric loopbacks again returned the exact successful empty header, and the Windows fragmented IPv4 probe passed. Service was left running with shared count 0. After the user confirmed the new HDC address `192.168.112.143:37727`, both the Windows fragmented DEVLIST probe and the actual `usbip.exe list -r 192.168.112.143` command succeeded; no devices were exported.
+
+Subsequent device clicks, backend selection, service/task starts and sharing actions are performed by the user. The agent performs local USB/IP tests and read-only screenshot review.

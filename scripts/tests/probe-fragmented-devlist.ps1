@@ -16,7 +16,7 @@ $client.SendTimeout = 4000
 try {
   $connect = $client.ConnectAsync($ServerHost, $Port)
   if (-not $connect.Wait(5000)) { throw 'DEVLIST connection timed out.' }
-  $connect.GetAwaiter().GetResult()
+  $null = $connect.GetAwaiter().GetResult()
   $stream = $client.GetStream()
   $first = [byte[]](0x01, 0x11, 0x80)
   $rest = [byte[]](0x05, 0x00, 0x00, 0x00, 0x00)

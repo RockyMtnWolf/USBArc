@@ -3,7 +3,8 @@ import {
   addressMatchesListener,
   mergeNetworkAddress,
   NetworkInterfaceAddress,
-  normalizeNetworkAddress
+  normalizeNetworkAddress,
+  selectDisplayNetworkAddresses
 } from '../main/ets/services/LocalNetworkAddresses';
 import { UsbIpServerStatus } from '../main/ets/usb/UsbModels';
 
@@ -115,6 +116,41 @@ export default function LocalNetworkAddressesTest() {
       expect((wlan as NetworkInterfaceAddress).prefixLength).assertEqual(24);
       expect((wlan as NetworkInterfaceAddress).source).assertEqual('getifaddrs');
       expect(merged.has('IPv4|ancowlan0|192.168.112.143')).assertTrue();
+    });
+
+    it('prefers wlan0 live addresses over the active default network', 0, () => {
+      const wlan: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '192.0.2.10', 'wlan0', 24, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const fallback: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '10.47.56.82', 'virnic4', 24, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const selected: Array<NetworkInterfaceAddress> = selectDisplayNetworkAddresses([fallback, wlan], ['virnic4']);
+      expect(selected.length).assertEqual(1);
+      expect(selected[0].interfaceName).assertEqual('wlan0');
+      expect(selected[0].address).assertEqual('192.0.2.10');
+    });
+
+    it('falls back to the active default interface and keeps its IPv4 and IPv6 addresses', 0, () => {
+      const ipv4: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '10.47.56.82', 'virnic4', 24, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const ipv6: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv6', '2001:db8::82', 'virnic4', 64, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const unrelated: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '172.30.1.2', 'chba0', 24, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const selected: Array<NetworkInterfaceAddress> = selectDisplayNetworkAddresses(
+        [ipv4, ipv6, unrelated], ['virnic4']);
+      expect(selected.length).assertEqual(2);
+      expect(selected[0].interfaceName).assertEqual('virnic4');
+      expect(selected[1].family).assertEqual('IPv6');
+    });
+
+    it('returns no address when wlan0 and active interface names have no live addresses', 0, () => {
+      const unrelated: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '172.30.1.2', 'chba0', 24, false, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const loopback: NetworkInterfaceAddress = normalizeNetworkAddress(
+        'IPv4', '127.0.0.1', 'lo', 8, true, true, true, 'getifaddrs') as NetworkInterfaceAddress;
+      const selected: Array<NetworkInterfaceAddress> = selectDisplayNetworkAddresses(
+        [unrelated, loopback], ['virnic4']);
+      expect(selected.length).assertEqual(0);
     });
   });
 }
