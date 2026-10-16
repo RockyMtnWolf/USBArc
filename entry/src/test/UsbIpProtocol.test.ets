@@ -28,6 +28,7 @@ import {
   mergeUsbHandleRetention,
   PendingTransfer,
   shouldRetainSharedUsbHandle,
+  usbIpDevidMatchesDevice,
   UsbIpServerService,
   usbIpSubmitDirection
 } from '../main/ets/services/UsbIpServer';
@@ -238,6 +239,15 @@ export default function UsbIpProtocolTest() {
       const request: UsbIpSubmitRequest = testRequest(8, USBIP_DIR_IN, 1);
       request.transferFlags = 0;
       expect(usbIpSubmitDirection(request)).assertEqual(USBIP_DIR_IN);
+    });
+
+    it('compares high-bit SUBMIT devid as unsigned and rejects a different imported address', 0, () => {
+      const highBitWireDevid: number = readU32(new Uint8Array([0xdf, 0x6e, 0x00, 0x01]), 0);
+      expect(highBitWireDevid).assertEqual(0xdf6e0001);
+      expect(usbIpDevidMatchesDevice(highBitWireDevid, 57198, 1)).assertTrue();
+      expect(usbIpDevidMatchesDevice(0x00070001, 7, 1)).assertTrue();
+      expect(usbIpDevidMatchesDevice(highBitWireDevid, 57198, 2)).assertFalse();
+      expect(usbIpDevidMatchesDevice(0xdf6e0000, 57198, 1)).assertFalse();
     });
 
     it('builds successful cancellation and submit reply headers with zero server basic fields', 0, () => {

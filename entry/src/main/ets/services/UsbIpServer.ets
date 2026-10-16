@@ -101,6 +101,14 @@ export function usbIpSubmitDirection(request: UsbIpSubmitRequest): number {
   return request.direction;
 }
 
+/** Compares USB/IP's unsigned 32-bit devid against the imported physical bus/address pair. */
+export function usbIpDevidMatchesDevice(devid: number, busNum: number, devAddress: number): boolean {
+  if (!Number.isInteger(devid) || !Number.isInteger(busNum) || !Number.isInteger(devAddress) ||
+    busNum < 0 || busNum > 0xffff || devAddress < 0 || devAddress > 0xffff) return false;
+  const importedDevid: number = (((busNum << 16) | devAddress) >>> 0);
+  return (devid >>> 0) === importedDevid;
+}
+
 export function classifyUnlinkTarget(pending: PendingTransfer | undefined): UnlinkDisposition {
   if (pending === undefined || pending.state === 'complete') return 'missing-or-completed';
   if (pending.state === 'queued') return 'cancel-queued';
@@ -544,7 +552,8 @@ export class UsbIpServerService {
       let pendingBytes: number = 0;
       state.pending.forEach((item: PendingTransfer) => { pendingBytes += item.request.transferLength; });
       if (pendingBytes + request.transferLength > 32 * 1024 * 1024) throw new Error('In-flight USB/IP request bytes exceed 32 MiB');
-      if (request.devid !== ((state.importedHandle.info.busNum << 16) | state.importedHandle.info.devAddress)) {
+      if (!usbIpDevidMatchesDevice(request.devid, state.importedHandle.info.busNum,
+        state.importedHandle.info.devAddress)) {
         throw new Error('SUBMIT device id does not match imported device');
       }
       this.queueSubmit(state, request);
