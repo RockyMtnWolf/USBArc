@@ -69,9 +69,20 @@ interface DdkRpcReply {
   status: number;
   error?: string;
   initialized?: boolean;
+  resourcesReleased?: boolean;
   value?: Object;
   actualLength?: number;
   data?: Array<number>;
+}
+
+export type DdkDriverHealth = 'healthy' | 'released' | 'unavailable';
+export type DdkReleasedCleanup = 'released-unbound' | 'released-still-bound' | 'not-released';
+
+export function classifyDdkDriverHealth(status: number, initialized: boolean | undefined,
+  resourcesReleased: boolean | undefined): DdkDriverHealth {
+  if (status === 0 && initialized === true) return 'healthy';
+  if (initialized === false && resourcesReleased === true) return 'released';
+  return 'unavailable';
 }
 
 interface DdkBinding {
@@ -202,8 +213,37 @@ export class DdkDriverClient {
     return (): void => { this.disconnectListeners.delete(listener); };
   }
 
+  async checkHealth(systemDeviceId: number): Promise<DdkDriverHealth> {
+    const response: DdkRpcReply = await this.call(systemDeviceId, makeRequest('health'));
+    return classifyDdkDriverHealth(response.status, response.initialized, response.resourcesReleased);
+  }
+
+  async cleanupReleasedBinding(systemDeviceId: number): Promise<DdkReleasedCleanup> {
+    const health: DdkDriverHealth = await this.checkHealth(systemDeviceId);
+    if (health !== 'released') return 'not-released';
+    const binding: DdkBinding | undefined = this.bindings.get(systemDeviceId);
+    if (binding === undefined) return 'released-unbound';
+    // `resourcesReleased` is reported only after the extension confirms release of every native claim.
+    binding.claimTokens.clear();
+    try {
+      await deviceManager.unbindDevice(systemDeviceId);
+    } catch (error) {
+      console.warn(`DDK resources were released, but DeviceManager unbind failed: ${this.fromPlatformError(
+        'unbind released DDK driver', error as Object).message}`);
+      return 'released-still-bound';
+    }
+    this.bindings.delete(systemDeviceId);
+    try { binding.driver.remote.unregisterDeathRecipient(binding.deathRecipient, 0); } catch (_error) { }
+    return 'released-unbound';
+  }
+
   async bind(systemDeviceId: number): Promise<void> {
-    if (this.bindings.has(systemDeviceId)) return;
+    if (this.bindings.has(systemDeviceId)) {
+      const health: DdkDriverHealth = await this.checkHealth(systemDeviceId);
+      if (health === 'healthy') return;
+      if (health === 'released') await this.cleanupReleasedBinding(systemDeviceId);
+      throw new DdkDriverClientError('Existing DDK binding is not healthy; retry after cleanup', -16, -16);
+    }
     const systemDevice: DdkSystemDeviceInfo | undefined = this.listSystemDevices().find(
       (device: DdkSystemDeviceInfo): boolean => device.deviceId === systemDeviceId);
     if (systemDevice === undefined) {
@@ -229,7 +269,7 @@ export class DdkDriverClient {
       this.bindings.set(systemDeviceId, binding);
       driver.remote.registerDeathRecipient(deathRecipient, 0);
       const health: DdkRpcReply = await this.call(systemDeviceId, makeRequest('health'));
-      if (health.initialized !== true || health.status !== 0) {
+      if (classifyDdkDriverHealth(health.status, health.initialized, health.resourcesReleased) !== 'healthy') {
         await this.unbind(systemDeviceId);
         throw new DdkDriverClientError('DDK driver service is not initialized', health.status, mapDdkUsbErrno(health.status));
       }
@@ -389,7 +429,7 @@ export class DdkDriverClient {
       if (!Number.isInteger(response.status)) {
         throw new DdkDriverClientError('DDK RPC returned a malformed status', -5, -5);
       }
-      if (response.status !== 0) {
+      if (response.status !== 0 && request.operation !== 'health') {
         const message: string = response.error ?? `DDK operation failed (${response.status})`;
         throw new DdkDriverClientError(message, response.status, mapDdkUsbErrno(response.status));
       }
