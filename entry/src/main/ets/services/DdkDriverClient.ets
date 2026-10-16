@@ -1,16 +1,34 @@
 import { BusinessError } from '@kit.BasicServicesKit';
 import { deviceManager } from '@kit.DriverDevelopmentKit';
 import { rpc } from '@kit.IPCKit';
+import {
+  cleanupDdkAshmem,
+  MAX_DDK_SHARED_TRANSFER_BYTES,
+  validateDdkSharedTransferResult
+} from './DdkDriverRpcContract';
 
 const DDK_RPC_CODE: number = 0x5542;
 const MAX_RPC_JSON_CHARS: number = 38000;
-export const MAX_DDK_RPC_TRANSFER_BYTES: number = 8000;
+export const MAX_DDK_RPC_TRANSFER_BYTES: number = MAX_DDK_SHARED_TRANSFER_BYTES;
 export const MAX_DDK_CONTROL_TRANSFER_BYTES: number = 1024;
 const RPC_WAIT_SECONDS: number = 35;
 
 export interface DdkTransferExpectation {
   isInput: boolean;
   maxLength: number;
+}
+
+function bytesToArrayBuffer(bytes: Array<number>): ArrayBuffer {
+  const result: Uint8Array = new Uint8Array(bytes.length);
+  for (let index: number = 0; index < bytes.length; index++) result[index] = bytes[index];
+  return result.buffer;
+}
+
+function arrayBufferToBytes(buffer: ArrayBuffer): Array<number> {
+  const view: Uint8Array = new Uint8Array(buffer);
+  const result: Array<number> = [];
+  for (let index: number = 0; index < view.length; index++) result.push(view[index]);
+  return result;
 }
 
 export interface DdkSystemDeviceInfo {
@@ -63,6 +81,8 @@ interface DdkRpcRequest {
   timeoutMs: number;
   setup: Array<number>;
   data: Array<number>;
+  sharedMemoryTransfer: boolean;
+  sharedMemoryLength: number;
 }
 
 interface DdkRpcReply {
@@ -187,7 +207,9 @@ function makeRequest(operation: string): DdkRpcRequest {
     endpointAddress: 0,
     timeoutMs: 0,
     setup: [],
-    data: []
+    data: [],
+    sharedMemoryTransfer: false,
+    sharedMemoryLength: 0
   };
 }
 
@@ -389,24 +411,59 @@ export class DdkDriverClient {
     const request: DdkRpcRequest = makeRequest('pipeTransfer');
     request.handle = handle;
     request.endpointAddress = endpointAddress;
-    request.data = data.slice();
+    request.sharedMemoryTransfer = true;
+    request.sharedMemoryLength = data.length;
     request.timeoutMs = normalizeDdkTimeout(timeoutMs);
-    return await this.transferCall(systemDeviceId, request);
+    const ashmemSize: number = Math.max(1, data.length);
+    let ashmem: rpc.Ashmem;
+    try {
+      ashmem = rpc.Ashmem.create('USBArc-DdkPipeTransfer', ashmemSize);
+    } catch (error) {
+      const detail: string = error instanceof Error ? error.message : 'unsupported RPC Ashmem API';
+      throw new DdkDriverClientError(`DDK pipe transport requires rpc.Ashmem: ${detail}`, -95, -95);
+    }
+    let mapped: boolean = false;
+    try {
+      ashmem.mapReadWriteAshmem();
+      mapped = true;
+      if ((endpointAddress & 0x80) === 0 && data.length > 0) {
+        ashmem.writeDataToAshmem(bytesToArrayBuffer(data), data.length, 0);
+      }
+      return await this.transferCall(systemDeviceId, request, ashmem, data.length);
+    } finally {
+      try {
+        cleanupDdkAshmem((): void => ashmem.unmapAshmem(), (): void => ashmem.closeAshmem(), mapped);
+      } catch (error) {
+        const detail: string = error instanceof Error ? error.message : 'unknown Ashmem cleanup error';
+        throw new DdkDriverClientError(`DDK pipe Ashmem cleanup failed: ${detail}`, -5, -5);
+      }
+    }
   }
 
-  private async transferCall(systemDeviceId: number, request: DdkRpcRequest): Promise<DdkTransferResult> {
-    const response: DdkRpcReply = await this.call(systemDeviceId, request);
+  private async transferCall(systemDeviceId: number, request: DdkRpcRequest,
+    sharedMemory?: rpc.Ashmem, sharedCapacity?: number): Promise<DdkTransferResult> {
+    const response: DdkRpcReply = await this.call(systemDeviceId, request, sharedMemory);
     const actualLength: number = response.actualLength ?? 0;
-    const data: Array<number> = response.data ?? [];
-    const expectation: DdkTransferExpectation = getDdkTransferExpectation(request.operation,
-      request.endpointAddress, request.setup, request.data);
-    if (!isValidDdkTransferResult(expectation, actualLength, data)) {
+    let data: Array<number> = response.data ?? [];
+    const isInput: boolean = request.operation === 'pipeTransfer' ?
+      (request.endpointAddress & 0x80) !== 0 : getDdkTransferExpectation(request.operation,
+        request.endpointAddress, request.setup, request.data).isInput;
+    const maxLength: number = sharedMemory === undefined ? getDdkTransferExpectation(request.operation,
+      request.endpointAddress, request.setup, request.data).maxLength : (sharedCapacity ?? 0);
+    if (sharedMemory !== undefined && isInput && response.status === 0 && actualLength > 0) {
+      data = arrayBufferToBytes(sharedMemory.readDataFromAshmem(actualLength, 0));
+    }
+    const valid: boolean = sharedMemory === undefined ?
+      isValidDdkTransferResult({ isInput, maxLength }, actualLength, data) :
+      validateDdkSharedTransferResult(isInput, maxLength, actualLength, data);
+    if (!valid) {
       throw new DdkDriverClientError('DDK RPC transfer response has invalid length', -5, -5);
     }
     return { status: response.status, actualLength, data: data.slice() };
   }
 
-  private async call(systemDeviceId: number, request: DdkRpcRequest): Promise<DdkRpcReply> {
+  private async call(systemDeviceId: number, request: DdkRpcRequest,
+    sharedMemory?: rpc.Ashmem): Promise<DdkRpcReply> {
     const binding: DdkBinding = this.requireBinding(systemDeviceId);
     const serialized: string = JSON.stringify(request);
     if (serialized.length > MAX_RPC_JSON_CHARS) {
@@ -416,6 +473,7 @@ export class DdkDriverClient {
     const reply: rpc.MessageSequence = rpc.MessageSequence.create();
     try {
       data.writeString(serialized);
+      if (sharedMemory !== undefined) data.writeAshmem(sharedMemory);
       const result: rpc.RequestResult = await binding.driver.remote.sendMessageRequest(
         DDK_RPC_CODE, data, reply, new rpc.MessageOption(rpc.MessageOption.TF_SYNC, RPC_WAIT_SECONDS));
       if (result.errCode !== 0) {

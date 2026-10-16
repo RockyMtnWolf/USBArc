@@ -3,15 +3,18 @@ import { Want } from '@kit.AbilityKit';
 import { rpc } from '@kit.IPCKit';
 import usbarcDdk from 'libusbarc_ddk.so';
 import {
+  cleanupDdkAshmem,
   DdkDriverWireReply,
   DdkDriverWireRequest,
   normalizeNativeDdkReply,
-  parseDdkDriverWireRequest
+  parseDdkDriverWireRequest,
+  validateDdkSharedTransfer,
+  validateDdkSharedTransferResult
 } from '../services/DdkDriverRpcContract';
 
 const DDK_RPC_CODE: number = 0x5542;
 const MAX_RPC_JSON_CHARS: number = 38000;
-const MAX_RPC_TRANSFER_BYTES: number = 8000;
+const MAX_RPC_INLINE_TRANSFER_BYTES: number = 8000;
 
 class DriverRemoteStub extends rpc.RemoteObject {
   private initialized: boolean;
@@ -32,21 +35,65 @@ class DriverRemoteStub extends rpc.RemoteObject {
     option: rpc.MessageOption): boolean {
     void option;
     if (code !== DDK_RPC_CODE) return false;
-    let response: DdkDriverWireReply;
+    let response: DdkDriverWireReply = { status: -5, error: 'DDK RPC request did not complete' };
+    let ashmem: rpc.Ashmem | undefined = undefined;
+    let ashmemMapped: boolean = false;
+    let request: DdkDriverWireRequest | undefined = undefined;
     try {
       const raw: string = data.readString();
       if (raw.length > MAX_RPC_JSON_CHARS) {
         response = { status: -90, error: 'DDK RPC request exceeds message size limit' };
       } else {
-        const request: DdkDriverWireRequest = parseDdkDriverWireRequest(raw);
-        if (request.data.length > MAX_RPC_TRANSFER_BYTES) {
-          response = { status: -90, error: `DDK transfer exceeds ${MAX_RPC_TRANSFER_BYTES}-byte RPC limit` };
+        request = parseDdkDriverWireRequest(raw);
+        if (request.sharedMemoryTransfer) {
+          const receivedAshmem: rpc.Ashmem = data.readAshmem();
+          ashmem = receivedAshmem;
+          validateDdkSharedTransfer(request.operation, request.sharedMemoryTransfer, request.sharedMemoryLength,
+            receivedAshmem.getAshmemSize(), request.data.length);
+          receivedAshmem.mapReadWriteAshmem();
+          ashmemMapped = true;
+          const isInput: boolean = (request.endpointAddress & 0x80) !== 0;
+          request.data = isInput ? createZeroBytes(request.sharedMemoryLength) : request.sharedMemoryLength === 0 ? [] :
+            arrayBufferToBytes(receivedAshmem.readDataFromAshmem(request.sharedMemoryLength, 0));
+          response = this.dispatch(request);
+          if (response.status === 0) {
+            const responseData: Array<number> = response.data ?? [];
+            if (!validateDdkSharedTransferResult(isInput, request.sharedMemoryLength,
+              response.actualLength ?? 0, responseData)) {
+              response = { status: -5, error: 'DDK returned invalid shared-transfer length or data' };
+            } else {
+              if (isInput && responseData.length > 0) {
+                receivedAshmem.writeDataToAshmem(bytesToArrayBuffer(responseData), responseData.length, 0);
+              }
+              response.data = [];
+            }
+          }
+        } else if (request.operation === 'pipeTransfer' || request.sharedMemoryLength !== 0) {
+          response = { status: -95, error: 'DDK pipe transfer requires rpc.Ashmem shared memory' };
+        } else if (request.data.length > MAX_RPC_INLINE_TRANSFER_BYTES) {
+          response = { status: -90, error: `DDK control payload exceeds ${MAX_RPC_INLINE_TRANSFER_BYTES}-byte JSON limit` };
         } else {
           response = this.dispatch(request);
         }
       }
     } catch (error) {
-      response = { status: -22, error: error instanceof Error ? error.message : 'Malformed DDK RPC request' };
+      const message: string = error instanceof Error ? error.message : 'Malformed DDK RPC request';
+      const isSharedPipe: boolean = request?.operation === 'pipeTransfer';
+      response = { status: isSharedPipe ? -95 : -22, error: isSharedPipe ? `DDK Ashmem transport failed: ${message}` : message };
+    } finally {
+      if (ashmem !== undefined) {
+        try {
+          const cleanupAshmem: rpc.Ashmem = ashmem;
+          cleanupDdkAshmem((): void => cleanupAshmem.unmapAshmem(),
+            (): void => cleanupAshmem.closeAshmem(), ashmemMapped);
+        } catch (error) {
+          const message: string = error instanceof Error ? error.message : 'unknown error';
+          console.error(`DDK Ashmem cleanup failed: ${message}`);
+          if (response.status === 0) {
+            response = { status: -5, error: `DDK Ashmem cleanup failed: ${message}` };
+          }
+        }
+      }
     }
     let serialized: string = JSON.stringify(response);
     if (serialized.length > MAX_RPC_JSON_CHARS) {
@@ -95,6 +142,25 @@ class DriverRemoteStub extends rpc.RemoteObject {
         return { status: -22, error: 'Unsupported DDK RPC operation' };
     }
   }
+}
+
+function createZeroBytes(length: number): Array<number> {
+  const result: Array<number> = [];
+  for (let index: number = 0; index < length; index++) result.push(0);
+  return result;
+}
+
+function arrayBufferToBytes(buffer: ArrayBuffer): Array<number> {
+  const view: Uint8Array = new Uint8Array(buffer);
+  const result: Array<number> = [];
+  for (let index: number = 0; index < view.length; index++) result.push(view[index]);
+  return result;
+}
+
+function bytesToArrayBuffer(bytes: Array<number>): ArrayBuffer {
+  const result: Uint8Array = new Uint8Array(bytes.length);
+  for (let index: number = 0; index < bytes.length; index++) result[index] = bytes[index];
+  return result.buffer;
 }
 
 export default class UsbArcDdkDriverExtensionAbility extends DriverExtensionAbility {
