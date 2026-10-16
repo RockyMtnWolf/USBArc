@@ -15,6 +15,7 @@ export interface DdkDriverWireReply {
   status: number;
   error?: string;
   initialized?: boolean;
+  resourcesReleased?: boolean;
   value?: Object;
   actualLength?: number;
   data?: Array<number>;

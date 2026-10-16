@@ -1,6 +1,8 @@
 import {
   DdkConfigurationDescriptor,
   DdkDeviceDescriptor,
+  DdkDriverHealth,
+  DdkReleasedCleanup,
   DdkDriverClient,
   DdkDriverClientError,
   DdkSystemDeviceInfo,
@@ -202,6 +204,7 @@ export class UsbDdkBackend {
   private selectedSystemDevices: Map<number, string> = new Map<number, string>();
   private sharedIds: Set<string> = new Set<string>();
   private closingIds: Set<string> = new Set<string>();
+  private unavailableIds: Set<string> = new Set<string>();
   private removedIds: Array<string> = [];
 
   constructor(client: DdkDriverClient = new DdkDriverClient()) {
@@ -238,6 +241,30 @@ export class UsbDdkBackend {
       this.selectedSystemDevices.delete(systemId);
       await this.client.unbind(systemId);
     }
+
+    const selectedSystemIds: Array<number> = Array.from(this.selectedSystemDevices.keys());
+    for (let index: number = 0; index < selectedSystemIds.length; index++) {
+      const systemId: number = selectedSystemIds[index];
+      const id: string = this.selectedSystemDevices.get(systemId) ?? '';
+      if (id.length === 0) continue;
+      let health: DdkDriverHealth = 'unavailable';
+      try {
+        health = await this.client.checkHealth(systemId);
+      } catch (_error) {
+        this.unavailableIds.add(id);
+        continue;
+      }
+      if (health === 'healthy') {
+        this.unavailableIds.delete(id);
+        continue;
+      }
+      if (health === 'released') {
+        try { await this.cleanupReleasedDevice(systemId, id); }
+        catch (_error) { this.unavailableIds.add(id); }
+      } else {
+        this.unavailableIds.add(id);
+      }
+    }
   }
 
   listDevices(): Array<UsbDeviceInfo> {
@@ -246,10 +273,11 @@ export class UsbDdkBackend {
       const selected: UsbDeviceInfo | undefined = this.selected.get(id);
       const row: UsbDeviceInfo = selected === undefined ? makeSystemRow(system) : this.copyInfo(selected);
       const handle: UsbDdkDeviceHandle | undefined = this.handles.get(id);
-      row.authorized = selected !== undefined;
+      const unavailable: boolean = this.unavailableIds.has(id);
+      row.authorized = selected !== undefined && !unavailable;
       row.occupied = handle !== undefined && handle.claimedInterfaces.length > 0;
       row.shared = this.sharedIds.has(id);
-      row.closing = this.closingIds.has(id);
+      row.closing = this.closingIds.has(id) || unavailable;
       row.available = !row.closing;
       return row;
     });
@@ -269,9 +297,21 @@ export class UsbDdkBackend {
     const previouslySelected: UsbDeviceInfo | undefined = this.selected.get(publicId);
     if (previouslySelected !== undefined && previouslySelected.authorized &&
       previouslySelected.backendDeviceId === systemDeviceId && previouslySelected.opaqueDeviceId !== undefined) {
-      // Repeated permission/auto-policy requests must not unbind a device that the server is
-      // already claiming for an active import. Disconnect notifications evict this cache.
-      return this.copyInfo(previouslySelected);
+      try {
+        const health: DdkDriverHealth = await this.client.checkHealth(systemDeviceId);
+        if (health === 'healthy') {
+          this.unavailableIds.delete(publicId);
+          // Never rebind a live selection: it may have interfaces claimed by an active import.
+          return this.copyInfo(previouslySelected);
+        }
+        if (health === 'released') await this.cleanupReleasedDevice(systemDeviceId, publicId);
+        else this.unavailableIds.add(publicId);
+      } catch (error) {
+        this.unavailableIds.add(publicId);
+        if (error instanceof DdkDriverClientError) throw error;
+        throw new DdkDriverClientError('DDK driver health could not be confirmed', -5, -5);
+      }
+      throw new DdkDriverClientError('DDK driver stopped or is unavailable; retry the connection request', -16, -16);
     }
     await this.client.bind(systemDeviceId);
     try {
@@ -337,6 +377,7 @@ export class UsbDdkBackend {
     if (info === undefined || !info.authorized || info.opaqueDeviceId === undefined) {
       throw new UsbBackendError('Bind and initialize the DDK driver for this device before sharing', -13);
     }
+    if (this.unavailableIds.has(deviceId)) throw new UsbBackendError('DDK driver health is unavailable', -19);
     this.sharedIds.add(deviceId);
   }
 
@@ -377,6 +418,7 @@ export class UsbDdkBackend {
   async openForImport(deviceId: string, forceClaim: boolean = false): Promise<UsbDdkDeviceHandle> {
     if (!this.sharedIds.has(deviceId)) throw new UsbBackendError('DDK device is not selected for sharing', -19);
     if (this.closingIds.has(deviceId)) throw new UsbBackendError('Previous DDK transfer is still draining', -16);
+    if (this.unavailableIds.has(deviceId)) throw new UsbBackendError('DDK driver health is unavailable', -19);
     if (forceClaim) throw new UsbBackendError('DDK does not expose force-claim semantics; disable force claim to continue', -95);
     const retained: UsbDdkDeviceHandle | undefined = this.handles.get(deviceId);
     if (retained !== undefined) return retained;
@@ -451,6 +493,7 @@ export class UsbDdkBackend {
     }
     this.handles.delete(deviceId);
     this.closingIds.delete(deviceId);
+    this.unavailableIds.delete(deviceId);
   }
 
   async closeAll(): Promise<void> {
@@ -473,6 +516,7 @@ export class UsbDdkBackend {
     this.sharedIds.clear();
     this.selected.clear();
     this.selectedSystemDevices.clear();
+    this.unavailableIds.clear();
   }
 
   setConfiguration(handle: UsbDdkDeviceHandle, value: number): number {
@@ -545,6 +589,31 @@ export class UsbDdkBackend {
       handle.claimedInterfaces = handle.claimedInterfaces.filter((id: number): boolean => id !== claims[index][0]);
       handle.activeAlternates.delete(claims[index][0]);
     }
+  }
+
+  private async cleanupReleasedDevice(systemDeviceId: number, deviceId: string): Promise<void> {
+    const cleanup: DdkReleasedCleanup = await this.client.cleanupReleasedBinding(systemDeviceId);
+    if (cleanup === 'not-released') {
+      this.unavailableIds.add(deviceId);
+      return;
+    }
+    const handle: UsbDdkDeviceHandle | undefined = this.handles.get(deviceId);
+    if (handle !== undefined) {
+      // A fresh health reply confirmed that the extension released every native claim.
+      handle.claimTokens.clear();
+      handle.claimedInterfaces = [];
+      handle.activeAlternates.clear();
+    }
+    if (cleanup === 'released-still-bound') {
+      this.unavailableIds.add(deviceId);
+      return;
+    }
+    if (handle !== undefined) this.removedIds.push(deviceId);
+    this.handles.delete(deviceId);
+    this.selected.delete(deviceId);
+    this.selectedSystemDevices.delete(systemDeviceId);
+    this.closingIds.delete(deviceId);
+    this.unavailableIds.delete(deviceId);
   }
 
   private copyInfo(source: UsbDeviceInfo): UsbDeviceInfo {

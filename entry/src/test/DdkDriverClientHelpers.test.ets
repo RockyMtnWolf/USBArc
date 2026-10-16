@@ -1,5 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
+  classifyDdkDriverHealth,
   getDdkTransferExpectation,
   isValidDdkTransferResult,
   mapDdkUsbErrno,
@@ -52,6 +53,13 @@ function descriptor(id: string, vendorId: number, productId: number): DdkDeviceD
 
 export default function DdkDriverClientHelpersTest() {
   describe('DdkDriverClientHelpersTest', () => {
+    it('requires explicit resource-release confirmation before classifying a stopped extension as clean', 0, () => {
+      expect(classifyDdkDriverHealth(0, true, false)).assertEqual('healthy');
+      expect(classifyDdkDriverHealth(27400002, false, true)).assertEqual('released');
+      expect(classifyDdkDriverHealth(27400002, false, false)).assertEqual('unavailable');
+      expect(classifyDdkDriverHealth(-5, undefined, undefined)).assertEqual('unavailable');
+    });
+
     it('normalizes an opaque DDK ID as a stable logical USB/IP bus ID', 0, () => {
       expect(makeDdkUsbIpBusId('184467')).assertEqual('ddk-184467');
     });

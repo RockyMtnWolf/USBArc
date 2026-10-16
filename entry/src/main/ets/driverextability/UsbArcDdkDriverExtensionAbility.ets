@@ -15,14 +15,17 @@ const MAX_RPC_TRANSFER_BYTES: number = 8000;
 
 class DriverRemoteStub extends rpc.RemoteObject {
   private initialized: boolean;
+  private resourcesReleased: boolean;
 
-  constructor(descriptor: string, initialized: boolean) {
+  constructor(descriptor: string, initialized: boolean, resourcesReleased: boolean) {
     super(descriptor);
     this.initialized = initialized;
+    this.resourcesReleased = resourcesReleased;
   }
 
-  setInitialized(initialized: boolean): void {
+  setHealth(initialized: boolean, resourcesReleased: boolean): void {
     this.initialized = initialized;
+    this.resourcesReleased = resourcesReleased;
   }
 
   onRemoteMessageRequest(code: number, data: rpc.MessageSequence, reply: rpc.MessageSequence,
@@ -56,7 +59,7 @@ class DriverRemoteStub extends rpc.RemoteObject {
   private dispatch(request: DdkDriverWireRequest): DdkDriverWireReply {
     if (request.operation === 'health') {
       const initialized: boolean = this.initialized && usbarcDdk.isInitialized();
-      return { status: initialized ? 0 : 27400002, initialized };
+      return { status: initialized ? 0 : 27400002, initialized, resourcesReleased: this.resourcesReleased };
     }
     if (!this.initialized || !usbarcDdk.isInitialized()) {
       return { status: 27400002, error: 'DDK extension is not initialized' };
@@ -96,29 +99,34 @@ class DriverRemoteStub extends rpc.RemoteObject {
 
 export default class UsbArcDdkDriverExtensionAbility extends DriverExtensionAbility {
   private initialized: boolean = false;
+  private resourcesReleased: boolean = true;
   private remote: DriverRemoteStub | undefined = undefined;
 
   onInit(want: Want): void {
     void want;
     const status: number = usbarcDdk.init();
     this.initialized = status === 0 && usbarcDdk.isInitialized();
+    this.resourcesReleased = !this.initialized;
     console.info(`USBArc DDK extension initialized=${this.initialized}, status=${status}`);
-    this.remote?.setInitialized(this.initialized);
+    this.remote?.setHealth(this.initialized, this.resourcesReleased);
   }
 
   onRelease(): void {
+    let status: number = 0;
     if (this.initialized) {
-      const status: number = usbarcDdk.release();
+      status = usbarcDdk.release();
       console.info(`USBArc DDK extension release status=${status}`);
     }
     this.initialized = false;
-    this.remote?.setInitialized(false);
+    this.resourcesReleased = status === 0 && !usbarcDdk.isInitialized();
+    this.remote?.setHealth(false, this.resourcesReleased);
   }
 
   onConnect(want: Want): rpc.RemoteObject {
     void want;
     if (this.remote === undefined) {
-      this.remote = new DriverRemoteStub('io.github.rockymtnwolf.usbarc.UsbArcDdkDriver', this.initialized);
+      this.remote = new DriverRemoteStub('io.github.rockymtnwolf.usbarc.UsbArcDdkDriver',
+        this.initialized, this.resourcesReleased);
     }
     return this.remote;
   }
