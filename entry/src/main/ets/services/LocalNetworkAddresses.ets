@@ -28,9 +28,30 @@ export interface NetworkInterfaceAddress {
 
 export interface NetworkAddressSnapshot {
   addresses: Array<NetworkInterfaceAddress>;
+  activeInterfaceNames: Array<string>;
   updatedAt: number;
   source: 'getifaddrs+connection';
   limitations: Array<string>;
+}
+
+/** Prefers wlan0 when it has a live address; otherwise returns addresses on the current active network. */
+export function selectDisplayNetworkAddresses(
+  addresses: Array<NetworkInterfaceAddress>,
+  activeInterfaceNames: Array<string>
+): Array<NetworkInterfaceAddress> {
+  const liveAddresses: Array<NetworkInterfaceAddress> = addresses.filter((address: NetworkInterfaceAddress): boolean =>
+    address.interfaceName.trim().length > 0 && address.isUp && !address.isLoopback);
+  const wlanAddresses: Array<NetworkInterfaceAddress> = liveAddresses.filter(
+    (address: NetworkInterfaceAddress): boolean => address.interfaceName === 'wlan0');
+  if (wlanAddresses.length > 0) return wlanAddresses;
+  for (let index: number = 0; index < activeInterfaceNames.length; index++) {
+    const interfaceName: string = activeInterfaceNames[index].trim();
+    if (interfaceName.length === 0) continue;
+    const activeAddresses: Array<NetworkInterfaceAddress> = liveAddresses.filter(
+      (address: NetworkInterfaceAddress): boolean => address.interfaceName === interfaceName);
+    if (activeAddresses.length > 0) return activeAddresses;
+  }
+  return [];
 }
 
 /** Uses the current server snapshot rather than enumeration-time reachability flags. */
@@ -175,7 +196,8 @@ export type NetworkAddressListener = (snapshot: NetworkAddressSnapshot) => void;
 
 export class LocalNetworkAddresses {
   private snapshot: NetworkAddressSnapshot = {
-    addresses: [], updatedAt: 0, source: 'getifaddrs+connection', limitations: DEFAULT_LIMITATIONS.slice()
+    addresses: [], activeInterfaceNames: [], updatedAt: 0,
+    source: 'getifaddrs+connection', limitations: DEFAULT_LIMITATIONS.slice()
   };
   private listeners: Set<NetworkAddressListener> = new Set<NetworkAddressListener>();
   private netConnection: connection.NetConnection | undefined = undefined;
@@ -227,6 +249,7 @@ export class LocalNetworkAddresses {
   private copySnapshot(): NetworkAddressSnapshot {
     return {
       addresses: this.snapshot.addresses.map((address: NetworkInterfaceAddress): NetworkInterfaceAddress => copyAddress(address)),
+      activeInterfaceNames: this.snapshot.activeInterfaceNames.slice(),
       updatedAt: this.snapshot.updatedAt,
       source: this.snapshot.source,
       limitations: this.snapshot.limitations.slice()
@@ -235,8 +258,23 @@ export class LocalNetworkAddresses {
 
   private async refreshInternal(): Promise<void> {
     const addresses: Map<string, NetworkInterfaceAddress> = new Map<string, NetworkInterfaceAddress>();
+    const activeInterfaceNames: Array<string> = [];
     const limitations: Array<string> = DEFAULT_LIMITATIONS.slice();
-    const listenerFamilies: Array<NetworkAddressFamily> = UsbIpServer.getStatus().listenerFamilies.slice();
+    let listenerFamilies: Array<NetworkAddressFamily> = [];
+    try {
+      listenerFamilies = UsbIpServer.getStatus().listenerFamilies.slice();
+    } catch (error) {
+      limitations.push(`监听状态读取失败，错误码 ${errorCode(error as Object)}。`);
+    }
+    let defaultNetworkId: number = -1;
+    let defaultNetwork: connection.NetHandle | undefined = undefined;
+    let defaultInterfaceFound: boolean = false;
+    try {
+      defaultNetwork = await connection.getDefaultNet();
+      defaultNetworkId = defaultNetwork.netId;
+    } catch (error) {
+      limitations.push(`系统默认网络读取失败，错误码 ${errorCode(error as Object)}。`);
+    }
     if (listenerFamilies.length === 0) {
       limitations.push('USB/IP服务当前未运行，尚无活动监听socket。');
     } else if (!(listenerFamilies.includes('IPv4') && listenerFamilies.includes('IPv6'))) {
@@ -263,6 +301,32 @@ export class LocalNetworkAddresses {
         const net: connection.NetHandle = networks[index];
         try {
           const properties: connection.ConnectionProperties = await connection.getConnectionProperties(net);
+          const interfaceName: string = properties.interfaceName.trim();
+          if (net.netId === defaultNetworkId && interfaceName.length > 0 &&
+            !activeInterfaceNames.includes(interfaceName)) {
+            activeInterfaceNames.unshift(interfaceName);
+            defaultInterfaceFound = true;
+          } else if (net.netId === defaultNetworkId && interfaceName.length > 0) {
+            defaultInterfaceFound = true;
+          }
+          if (net.netId !== defaultNetworkId) {
+            try {
+              const capabilities: connection.NetCapabilities = await connection.getNetCapabilities(net);
+              const networkCaps: Array<connection.NetCap> = capabilities.networkCap ?? [];
+              const bearers: Array<connection.NetBearType> = capabilities.bearerTypes;
+              const isPhysicalInternet: boolean = networkCaps.includes(connection.NetCap.NET_CAPABILITY_INTERNET) &&
+                networkCaps.includes(connection.NetCap.NET_CAPABILITY_NOT_VPN) &&
+                (bearers.includes(connection.NetBearType.BEARER_WIFI) ||
+                  bearers.includes(connection.NetBearType.BEARER_ETHERNET) ||
+                  bearers.includes(connection.NetBearType.BEARER_CELLULAR)) &&
+                !bearers.includes(connection.NetBearType.BEARER_VPN);
+              if (isPhysicalInternet && interfaceName.length > 0 && !activeInterfaceNames.includes(interfaceName)) {
+                activeInterfaceNames.push(interfaceName);
+              }
+            } catch (capabilityError) {
+              limitations.push(`网络 ${net.netId} 能力读取失败，错误码 ${errorCode(capabilityError as Object)}。`);
+            }
+          }
           for (let addrIndex: number = 0; addrIndex < properties.linkAddresses.length; addrIndex++) {
             const link: connection.LinkAddress = properties.linkAddresses[addrIndex];
             const netAddress: connection.NetAddress = link.address;
@@ -280,6 +344,18 @@ export class LocalNetworkAddresses {
       limitations.push(`NetworkKit网络列表读取失败，错误码 ${errorCode(error as Object)}。`);
       hilog.warn(DOMAIN, TAG, 'NetworkKit getAllNets failed. code=%{public}d', errorCode(error as Object));
     }
+    if (!defaultInterfaceFound && defaultNetwork !== undefined) {
+      try {
+        const defaultProperties: connection.ConnectionProperties =
+          await connection.getConnectionProperties(defaultNetwork);
+        const defaultInterfaceName: string = defaultProperties.interfaceName.trim();
+        if (defaultInterfaceName.length > 0 && !activeInterfaceNames.includes(defaultInterfaceName)) {
+          activeInterfaceNames.unshift(defaultInterfaceName);
+        }
+      } catch (defaultPropertiesError) {
+        limitations.push(`默认网卡名称读取失败，错误码 ${errorCode(defaultPropertiesError as Object)}。`);
+      }
+    }
 
     const sorted: Array<NetworkInterfaceAddress> = Array.from(addresses.values());
     sorted.sort((left: NetworkInterfaceAddress, right: NetworkInterfaceAddress): number => {
@@ -288,7 +364,13 @@ export class LocalNetworkAddresses {
       if (left.family !== right.family) return left.family === 'IPv4' ? -1 : 1;
       return left.address.localeCompare(right.address);
     });
-    this.snapshot = { addresses: sorted, updatedAt: Date.now(), source: 'getifaddrs+connection', limitations };
+    this.snapshot = {
+      addresses: sorted,
+      activeInterfaceNames,
+      updatedAt: Date.now(),
+      source: 'getifaddrs+connection',
+      limitations
+    };
     const published: NetworkAddressSnapshot = this.copySnapshot();
     this.listeners.forEach((listener: NetworkAddressListener): void => {
       try {

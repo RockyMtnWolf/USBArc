@@ -13,7 +13,13 @@ import { UsbDeviceCard } from '../components/UsbDeviceCard';
 import { MetricItem } from '../components/MetricItem';
 import { sharedUsbArcController } from '../services/UsbArcController';
 import { UsbArcPreferencesData } from '../services/UsbArcPreferences';
-import { addressMatchesListener, NetworkAddressSnapshot, NetworkInterfaceAddress, sharedLocalNetworkAddresses } from '../services/LocalNetworkAddresses';
+import {
+  addressMatchesListener,
+  NetworkAddressSnapshot,
+  NetworkInterfaceAddress,
+  selectDisplayNetworkAddresses,
+  sharedLocalNetworkAddresses
+} from '../services/LocalNetworkAddresses';
 import { UsbDeviceInfo, UsbIpServerStatus } from '../usb/UsbModels';
 
 type UsbArcTab = 'devices' | 'settings';
@@ -115,8 +121,7 @@ struct Index {
   }
 
   private applyNetworkSnapshot(snapshot: NetworkAddressSnapshot): void {
-    this.networkAddresses = snapshot.addresses.filter((address: NetworkInterfaceAddress): boolean =>
-      address.interfaceName === 'wlan0');
+    this.networkAddresses = selectDisplayNetworkAddresses(snapshot.addresses, snapshot.activeInterfaceNames);
     const failures: Array<string> = snapshot.limitations.filter((limitation: string): boolean =>
       limitation.indexOf('失败') >= 0);
     this.networkEnumerationWarning = failures.length > 0 ? '部分网卡信息未能读取，地址列表可能不完整。' : '';
@@ -420,7 +425,8 @@ struct Index {
         Column({ space: 12 }) {
           Row({ space: 12 }) {
             Column({ space: 4 }) {
-              Text('wlan0 网络地址')
+              Text(this.networkAddresses.length > 0 ?
+                `${this.networkAddresses[0].interfaceName} 网络地址` : '当前网络地址')
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('sys.color.font_primary'))
