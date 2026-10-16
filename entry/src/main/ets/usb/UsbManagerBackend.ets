@@ -12,6 +12,7 @@ import {
   UsbTransferResult,
   makeDeviceId
 } from './UsbModels';
+import { isProvableUsbHub, usbManagerHubDescriptor } from './UsbHubClassification';
 
 const USB_LOG_DOMAIN: number = 0x0000;
 const USB_LOG_TAG: string = 'UsbManagerBackend';
@@ -102,7 +103,8 @@ export class UsbManagerBackend {
 
   listDevices(): Array<UsbDeviceInfo> {
     const devices: Array<usbManager.USBDevice> = usbManager.getDevices();
-    return devices.map((device: usbManager.USBDevice): UsbDeviceInfo => {
+    return devices.filter((device: usbManager.USBDevice): boolean => !isProvableUsbHub(usbManagerHubDescriptor(device)))
+      .map((device: usbManager.USBDevice): UsbDeviceInfo => {
       const info: UsbDeviceInfo = mapDevice(device);
       info.serialNumber = this.serialCache.get(info.id) ?? info.serialNumber;
       info.speed = this.querySpeed(device);

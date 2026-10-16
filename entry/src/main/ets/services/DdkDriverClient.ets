@@ -1,6 +1,7 @@
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, usbManager } from '@kit.BasicServicesKit';
 import { deviceManager } from '@kit.DriverDevelopmentKit';
 import { rpc } from '@kit.IPCKit';
+import { shouldHideDdkHubRow, UsbHubDeviceDescriptor, usbManagerHubDescriptor } from '../usb/UsbHubClassification';
 import {
   cleanupDdkAshmem,
   MAX_DDK_SHARED_TRANSFER_BYTES,
@@ -220,9 +221,19 @@ export class DdkDriverClient {
   listSystemDevices(): Array<DdkSystemDeviceInfo> {
     try {
       const result: Array<DdkSystemDeviceInfo> = [];
+      let managerDevices: Array<Readonly<usbManager.USBDevice>> = [];
+      try {
+        managerDevices = usbManager.getDevices();
+      } catch (_error) {
+        // Missing USBManager metadata is not evidence that a DDK row is a hub.
+      }
+      const managerDescriptors: Array<UsbHubDeviceDescriptor> = managerDevices.map(
+        (item: Readonly<usbManager.USBDevice>): UsbHubDeviceDescriptor => usbManagerHubDescriptor(item));
       deviceManager.queryDevices(deviceManager.BusType.USB).forEach((device: Readonly<deviceManager.Device>): void => {
         const mapped: DdkSystemDeviceInfo | undefined = toSystemDeviceInfo(device);
-        if (mapped !== undefined) result.push(mapped);
+        if (mapped === undefined) return;
+        if (shouldHideDdkHubRow(mapped.vendorId, mapped.productId, managerDescriptors)) return;
+        result.push(mapped);
       });
       return result;
     } catch (error) {
