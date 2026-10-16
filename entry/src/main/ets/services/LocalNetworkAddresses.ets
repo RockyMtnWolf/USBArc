@@ -3,7 +3,7 @@ import { connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import usbipNative from 'libusbip_native.so';
 import { UsbIpServer } from './UsbIpServer';
-import { UsbIpServerEvent } from '../usb/UsbModels';
+import { UsbIpServerEvent, UsbIpServerStatus } from '../usb/UsbModels';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'LocalNetworkAddresses';
@@ -31,6 +31,17 @@ export interface NetworkAddressSnapshot {
   updatedAt: number;
   source: 'getifaddrs+connection';
   limitations: Array<string>;
+}
+
+/** Uses the current server snapshot rather than enumeration-time reachability flags. */
+export function addressMatchesListener(address: NetworkInterfaceAddress, status: UsbIpServerStatus): boolean {
+  if (!status.running || !address.isUp || address.isLoopback || !status.listenerFamilies.includes(address.family)) {
+    return false;
+  }
+  const configuredHost: string = status.host.trim().split('%')[0];
+  if (configuredHost.length === 0 || configuredHost === '0.0.0.0' || configuredHost === '::') return true;
+  const localAddress: string = address.address.split('%')[0];
+  return configuredHost === localAddress;
 }
 
 interface NativeAddressRow {
@@ -171,6 +182,7 @@ export class LocalNetworkAddresses {
   private serverUnsubscribe: (() => void) | undefined = undefined;
   private registerCallback: ((error: BusinessError | null | undefined) => void) | undefined = undefined;
   private refreshPromise: Promise<void> | undefined = undefined;
+  private refreshRequested: boolean = false;
 
   async listAddresses(): Promise<NetworkAddressSnapshot> {
     await this.refresh();
@@ -189,15 +201,27 @@ export class LocalNetworkAddresses {
   async refresh(): Promise<void> {
     const activeRefresh: Promise<void> | undefined = this.refreshPromise;
     if (activeRefresh !== undefined) {
+      this.refreshRequested = true;
       return activeRefresh;
     }
-    const newRefresh: Promise<void> = this.refreshInternal();
+    const newRefresh: Promise<void> = this.refreshUntilClean();
     this.refreshPromise = newRefresh;
+    let refreshAgain: boolean = false;
     try {
       await newRefresh;
     } finally {
       if (this.refreshPromise === newRefresh) this.refreshPromise = undefined;
+      refreshAgain = this.refreshRequested;
+      this.refreshRequested = false;
     }
+    if (refreshAgain) await this.refresh();
+  }
+
+  private async refreshUntilClean(): Promise<void> {
+    do {
+      this.refreshRequested = false;
+      await this.refreshInternal();
+    } while (this.refreshRequested);
   }
 
   private copySnapshot(): NetworkAddressSnapshot {
