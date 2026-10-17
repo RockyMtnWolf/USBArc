@@ -2,6 +2,12 @@
 
 Last updated: 2026-10-17 (Asia/Shanghai)
 
+## Dedicated release signing and public distribution
+
+The initial debug-profile test artifact below is historical. A dedicated release key was subsequently generated locally, and the user supplied a newly issued matching release certificate and Profile. The Release-mode `store` product successfully built an APP bundle. Official verification of the outer `.app` signature succeeded; its embedded Profile also verified successfully, had type `release`, matched the signer and app bundle, and included `ohos.permission.ACCESS_DDK_USB`. Application metadata has `debug=false`, vendor `RockyMtnWolf`, version `1.0.0`, and device type `2in1`. Signing and Profile checks do not establish hardware validation of this Release build or AppGallery approval.
+
+The signed APP is retained only in the ignored local submission-material directory. GitHub distribution uses only the unsigned Release-mode HAP. No APP, signing certificate, private key, provisioning profile or password is included in public release assets. See [publishing separation](PUBLISHING.md).
+
 ## Release-mode build and latest Windows retest
 
 The local Release-mode build for source `984dfa8` succeeded; its log is `.cache/validation/build-release.log`. The delivered artifact is `.cache/releases/USBArc-1.0.0-api26-release-test-20261017.hap` (SHA-256 `FF523EBDEBCA2E9C7A7B6CE97CAD7FA5BC04195F93B07B7B3AD2A43D8B366AA6`), with notes in `.cache/releases/RELEASE-NOTES-20261017.md`. Official `verify-app` succeeded, including native code-signature verification; `verify-profile` reports the configured `USB_DDK_TestDebug.p7b` is **debug** type. The HAP metadata reports `debug=false`, vendor `RockyMtnWolf`, version `1.0.0`. Label this artifact **Release-mode, debug-profile-signed test HAP**. It is not a market/production-signed release, and no remote publishing occurred. The Release HAP has **not** been installed or run on the MateBook; the device at the time of the latest hardware check was running the same-source debug build. These checks establish local packaging and signature validity, not store readiness.
