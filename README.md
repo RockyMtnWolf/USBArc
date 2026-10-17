@@ -32,6 +32,18 @@ devecocli run --module entry --device <HDC地址>
 
 `build-profile.json5` 为忽略文件；签名私钥、证书配置和密码不进入版本库。不要用示例文件覆盖已经配置好的本地签名。
 
+### 本地 Release-mode 验证
+
+本地检查 Release 配置时运行：
+
+```powershell
+devecocli build --modules entry --build-mode release
+```
+
+这会使用忽略文件 `build-profile.json5` 中现有的本地签名配置。当前配置引用的 `USB_DDK_TestDebug.p7b` 已由官方工具核验为 **debug 类型** Profile；因此，即使构建模式为 `release`，生成物也只是 **Release-mode、debug-profile 签名的本地测试 HAP**，不是市场或生产签名包，也不表示已达到上架条件。构建成功只证明本地 Release 构建链可用。
+
+构建后可用 DevEco SDK 自带的 `hap-sign-tool.jar verify-app` 验证实际生成的签名 HAP。将命令输出的证书链、嵌入 Profile 和任何摘要文件放在 Git 忽略的 `.cache/validation/` 下；审查时只汇报 Profile 类型、bundle name 和 ACL allowlist，不打印或提交 Profile 内容、私钥或密码。这个验证流程只检查本地构建产物，不执行远端发布。
+
 正式 DDK 接入采用主应用同包方案，需要签名 Profile 获批 `ohos.permission.ACCESS_DDK_USB`；自动生成普通调试 Profile 不能代替该权限。详情见 [DDK 签名准备](docs/DDK_SIGNING.md)。
 
 ## Windows 连接
