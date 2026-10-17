@@ -4,6 +4,8 @@ Last updated: 2026-10-17 (Asia/Shanghai)
 
 ## Dedicated release signing and public distribution
 
+The first submission used an outer-only signed APP and the user reported AGC 993. After enabling `appWithSignedPkg` and verifying both outer APP and nested HAP signatures, the user confirmed the new all-signed APP uploaded successfully. Both packages used the same verified Release Profile; the separately expired Debug Profile was not substituted into the Release build. This records successful upload/parsing, not review approval.
+
 The initial debug-profile test artifact below is historical. A dedicated release key was subsequently generated locally, and the user supplied a newly issued matching release certificate and Profile. The Release-mode `store` product successfully built an APP bundle. Official verification of the outer `.app` signature succeeded; its embedded Profile also verified successfully, had type `release`, matched the signer and app bundle, and included `ohos.permission.ACCESS_DDK_USB`. Application metadata has `debug=false`, vendor `RockyMtnWolf`, version `1.0.0`, and device type `2in1`. Signing and Profile checks do not establish hardware validation of this Release build or AppGallery approval.
 
 The signed APP is retained only in the ignored local submission-material directory. GitHub distribution uses only the unsigned Release-mode HAP. No APP, signing certificate, private key, provisioning profile or password is included in public release assets. See [publishing separation](PUBLISHING.md).
