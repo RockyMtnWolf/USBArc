@@ -55,7 +55,7 @@ DDK 模式也仅为真实速率查询临时借用 usbManager，并在读取后�
 
 任务保持和模拟下载都是系统后台任务请求。模拟下载不会下载文件或伪造进度，系统可能因没有真实下载活动而取消该任务；PC 建议优先选择任务保持。任何模式都不保证系统永远不结束进程。
 
-2026-10-16 的 MateBook 当前枚举到 SanDisk U 盘与 RTL9210B-CG 硬盘桥；此前串口与调试器的枚举记录不能代替当前实测。枚举、系统授权、USB/IP 导入及实际数据传输分别验收，不能据构建或协议测试宣称真实 USB 设备兼容性。最新结果见 [验证记录](docs/VALIDATION.md)，界面检查见 [视觉 QA](docs/VISUAL_QA.md)，实施与验收范围见 [开发计划](DEVELOPMENT_PLAN.md)。
+2026-10-16 最后验证时实机仅扩展坞与 CH340。DDK 路径已通过 Windows usbip-win2 接入、COM3 正常枚举、detach 及重新接入；未打开串口或发送 UART 数据。扩展坞 Hub 已隐藏。此前 SanDisk 与 RTL9210B-CG 仅验证绑定和描述符读取，不能据此宣称存储兼容。最新结果见 [验证记录](docs/VALIDATION.md)，界面检查见 [视觉 QA](docs/VISUAL_QA.md)，实施与验收范围见 [开发计划](DEVELOPMENT_PLAN.md)。
 
 界面和桌面生命周期参考同一工作区中的 MeshArc；此项目不包含其 VPN/Tailscale 引擎。
 
