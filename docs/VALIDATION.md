@@ -2,7 +2,13 @@
 
 Last updated: 2026-10-17 (Asia/Shanghai)
 
-## Latest CH340 iteration
+## Release-mode build and latest Windows retest
+
+The local Release-mode build for source `984dfa8` succeeded; its log is `.cache/validation/build-release.log`. The delivered artifact is `.cache/releases/USBArc-1.0.0-api26-release-test-20261017.hap` (SHA-256 `FF523EBDEBCA2E9C7A7B6CE97CAD7FA5BC04195F93B07B7B3AD2A43D8B366AA6`), with notes in `.cache/releases/RELEASE-NOTES-20261017.md`. Official `verify-app` succeeded, including native code-signature verification; `verify-profile` reports the configured `USB_DDK_TestDebug.p7b` is **debug** type. The HAP metadata reports `debug=false`, vendor `RockyMtnWolf`, version `1.0.0`. Label this artifact **Release-mode, debug-profile-signed test HAP**. It is not a market/production-signed release, and no remote publishing occurred. The Release HAP has **not** been installed or run on the MateBook; the device at the time of the latest hardware check was running the same-source debug build. These checks establish local packaging and signature validity, not store readiness.
+
+The latest user Windows retest covered CH340 (`1A86:7523`) and ST-Link V2 (`0483:3748`). Initially CH340 attached as port 1 and ST-Link as port 2; ST-Link reported Code 10 / `ProblemStatus 0xC00000B5`. After reconnecting in reverse order, ST-Link was port 1 and CH340 port 2; ST-Link reported `ProblemCode 0`, and the user successfully read the STM32 with STM32CubeProgrammer. In the latest simultaneous check, both devices were present with PnP status `OK` and `ProblemCode 0`; CH340 appeared as COM4. The UI showed both cards as in use, with detected/shared/connected counts all 2. A fragmented read-only DEVLIST probe also passed with two devices. The screenshot is `evidence/matebook-two-devices-final-20261017.png`. The cause of the first startup timeout remains unknown; no concurrency/blocking cause is inferred. These observations cover only these two devices and do not establish compatibility for all devices or transfer types.
+
+## Previous CH340 functional iteration (historical)
 
 The tested functional package has 51/51 passing Local Tests, a successful debug build, and lint with 0 errors / 4 existing warnings. It was installed at `192.168.112.143:37727` after the user stopped the service. On 2026-10-17, the user requested vendor `RockyMtnWolf`; that metadata-only revision built successfully and its packaged `module.json` was checked. Subsequent clicks and task/service starts are performed by the user.
 
