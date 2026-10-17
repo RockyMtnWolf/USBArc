@@ -37,3 +37,6 @@
 /signature/
 /.local-sign/
 /上架材料/
+*.app
+*.APP
+*.hap
