@@ -1,5 +1,7 @@
 # USBArc 视觉 QA
 
+最终 DDK/Hub 修复包已截图复核：[`matebook-ch340-hubs-hidden-final-20261016.png`](evidence/matebook-ch340-hubs-hidden-final-20261016.png)。主页仅保留 1 台真实 CH340，产品名为 `USB Serial`，状态为“客户端使用中”，共享/客户端/检测计数均为 1；扩展坞两个 Hub 不再展示。wlan0 恢复连接后优先显示其 IPv4、IPv6，两族均标为监听中。卡片和操作完整可见，无协议错误提示；Windows 同时确认 COM3 正常枚举。
+
 2026-10-16 最新地址修复包已完成截图复核：[`matebook-active-network-20261016.png`](evidence/matebook-active-network-20261016.png)。当 wlan0 没有地址时，页面显示 NetworkKit 实际默认网卡 `virnic4` 的 IPv4 和带作用域 IPv6，标题明确标注接口名；启动后两族和地址行均显示监听中。没有 wlan0 标题下的小字。两台真实 DDK 设备均显示空闲、驱动已连接，共享计数为 0。此图确认显示与布局，不代替接口占用或 USB 数据传输验证。
 
 参考：同工作区 MeshArc 的 `MeshArc-1.1.1-送审资料/01-home.png` 与 `05-settings.png`。主代理已实际查看参考图和下列实机截图，代码构建结果不代替视觉检查。

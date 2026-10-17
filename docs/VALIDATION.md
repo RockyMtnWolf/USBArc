@@ -1,6 +1,22 @@
 # Validation Record
 
-Last updated: 2026-10-16 11:33 (Asia/Shanghai)
+Last updated: 2026-10-17 (Asia/Shanghai)
+
+## Latest CH340 iteration
+
+The tested functional package has 51/51 passing Local Tests, a successful debug build, and lint with 0 errors / 4 existing warnings. It was installed at `192.168.112.143:37727` after the user stopped the service. On 2026-10-17, the user requested vendor `RockyMtnWolf`; that metadata-only revision built successfully and its packaged `module.json` was checked. Subsequent clicks and task/service starts are performed by the user.
+
+The user connected only a dock and CH340, then shared CH340 in DDK mode. Windows `usbip.exe list` correctly identified `1A86:7523` at `ddk-4294967299`; raw DEVLIST confirmed genuine full-speed enum `2` from the approved read-only USBManager speed query. Screenshot inspection confirmed the device product name is now `USB Serial`, rather than a hardware path. DDK transfers and interface claims remain separate from this temporary speed-query pipe.
+
+The first Windows attach returned port 1, then disconnected before a serial device appeared. The app reported `SUBMIT device id does not match imported device`. Root traced this to comparing an unsigned on-wire ID with a signed ArkTS bitwise result for logical bus 57198. The current package compares unsigned IDs, with a production regression for `0xdf6e0001` and mismatch cases.
+
+After the ID correction, Windows enumerated `USB-SERIAL CH340 (COM3)` with PnP status `OK` and `DEVPKEY_Device_ProblemCode=0`. A pre-existing local test attachment reconnected first, explaining one additional attach attempt's `Device not available` response while the device was already owned. Root stopped only this target's retry attempt and detached port 1, then a fresh `attach --once` succeeded on port 1, still at Full Speed (12 Mbps), with COM3 `OK`. The reviewed maximized screenshot `evidence/matebook-ch340-com3-20261016.png` shows one shared device, one client and `客户端使用中`. After cleanup detach, the card correctly returned to `共享中`. No serial port was opened and no UART payload was sent.
+
+The dock exposes two logical hub IDs, `2109:0817` and `2109:2817`. The first conservative hub filter retained them because a matching USBManager hub classification was unavailable. The final filter also recognizes class 09 from a strictly validated, VID/PID-consistent DeviceManager hardware identifier; this format is observed on the MateBook, not an SDK-guaranteed encoding. Unknown formats remain visible. Root reviewed `evidence/matebook-ch340-hubs-hidden-final-20261016.png`: only one CH340 card remains, detected/shared/client counts are each 1, the product name is `USB Serial`, and its state is `客户端使用中`. A fresh local attach on this final functional build again produced COM3 with status OK.
+
+The DDK pipe transport now uses one Ashmem attachment per atomic URB, capped at 1 MiB; 64 KiB, short-IN and cleanup paths have helper-test coverage. No large hardware transfer or serial payload test has been performed. No storage device was imported or used for data I/O.
+
+The following section records the earlier dual-stack baseline; its empty DEVLIST and storage-metadata observations are historical, not the current CH340 inventory.
 
 This record distinguishes local USB/IP listener checks from remote transport and USB device operations. DDK binding and read-only descriptor/configuration queries succeeded; storage interfaces were not claimed and no storage device was imported, attached, or used for data I/O.
 
