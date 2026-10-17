@@ -89,11 +89,11 @@ The default port is `3240`. USBArc listens only after the user confirms the sele
 
 ## Screenshots
 
-![USBArc device list](docs/screenshots/01-devices.png)
+![USBArc device list](image/01-devices.png)
 
-![USBArc settings](docs/screenshots/02-settings.png)
+![USBArc settings](image/02-settings.png)
 
-![USBArc device list in dark theme](docs/screenshots/03-devices-dark.png)
+![USBArc device list in dark theme](image/03-devices-dark.png)
 
 ## Permissions
 
