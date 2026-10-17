@@ -89,11 +89,11 @@ usbip.exe attach -r <USBArc-address> -b <bus-id>
 
 ## 截图
 
-![USBArc 设备列表](docs/screenshots/01-devices.png)
+![USBArc 设备列表](image/01-devices.png)
 
-![USBArc 设置页](docs/screenshots/02-settings.png)
+![USBArc 设置页](image/02-settings.png)
 
-![USBArc 深色主题设备列表](docs/screenshots/03-devices-dark.png)
+![USBArc 深色主题设备列表](image/03-devices-dark.png)
 
 ## 权限
 
