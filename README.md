@@ -13,7 +13,7 @@
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-API%2026-007DFF?style=for-the-badge)](https://developer.huawei.com/consumer/en/)
 [![Device class](https://img.shields.io/badge/Device-2--in--1-3DA5D9?style=for-the-badge)](#compatibility)
 [![Protocol](https://img.shields.io/badge/Protocol-USB%2FIP-0A7EA4?style=for-the-badge)](https://github.com/vadimgrn/usbip-win2)
-[![Optional DDK](https://img.shields.io/badge/USB%20DDK-Optional-6B7280?style=for-the-badge)](docs/PERMISSIONS.md)
+[![Optional DDK](https://img.shields.io/badge/USB%20DDK-Optional-6B7280?style=for-the-badge)](#permissions)
 
 [Source repository](https://github.com/RockyMtnWolf/USBArc) · [简体中文](README_zh.md)
 
@@ -52,7 +52,7 @@ DDK mode reports USB speed only after a temporary, read-only USBManager pipe is 
 
 Check [GitHub Releases](https://github.com/RockyMtnWolf/USBArc/releases) for unsigned HAP packages and release notes. A device generally requires an accepted signature before installation. Sign the package with credentials you are authorized to use. Do not share signing keys or provisioning profiles.
 
-The USBManager API itself does not require the DDK ACL. However, the current combined HAP declares `ACCESS_DDK_USB` and the driver extension unconditionally, and installation with an ordinary profile has not been verified—even if USBManager mode is selected. To use the optional DDK backend, the signing profile must include the approved `ohos.permission.ACCESS_DDK_USB` ACL. Without that ACL, remove the DDK permission and driver extension from the source before building a manager-only package; this manager-only configuration has not been tested. See [Permissions and signing](docs/PERMISSIONS.md).
+The USBManager API itself does not require the DDK ACL. However, the current combined HAP declares `ACCESS_DDK_USB` and the driver extension unconditionally, and installation with an ordinary profile has not been verified—even if USBManager mode is selected. To use the optional DDK backend, the signing profile must include the approved `ohos.permission.ACCESS_DDK_USB` ACL. Without that ACL, remove the DDK permission and driver extension from the source before building a manager-only package; this manager-only configuration has not been tested.
 
 ## Build
 
@@ -97,7 +97,17 @@ The default port is `3240`. USBArc listens only after the user confirms the sele
 
 ## Permissions
 
-USB device authorization, optional DDK access, background task requests, and network listening are separate controls. Their requirements and limits are documented in [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
+USB device authorization, DDK access, background tasks, and network listening are separate controls. The app requests these five manifest permissions:
+
+| Permission | Protection | Purpose |
+| --- | --- | --- |
+| `ohos.permission.INTERNET` | Normal, system-grant | USB/IP networking. Does not grant firewall or inbound-network approval. |
+| `ohos.permission.GET_NETWORK_INFO` | Normal, system-grant | Read active network and local address information. |
+| `ohos.permission.KEEP_BACKGROUND_RUNNING` | Normal, system-grant | Request supported background tasks; the system can decline or cancel them. |
+| `ohos.permission.ACCESS_EXTENSIONAL_DEVICE_DRIVER` | Normal, system-grant | DeviceManager external-device query and driver binding APIs. |
+| `ohos.permission.ACCESS_DDK_USB` | System-basic, system-grant, restricted ACL | USB DDK access for the driver extension; requires an approved signing-profile ACL. |
+
+These classifications are from the API 26 SDK. USBManager device authorization is a separate per-device system request, not a manifest permission. The combined HAP unconditionally declares the two DDK-related permissions; ordinary-profile installation has not been verified even in USBManager mode. Without the DDK ACL, a manager-only source build must remove the DDK permission and driver extension; that configuration has not been tested. Background-task confirmation and TCP inbound/firewall policy are also separate from manifest permissions. See [Privacy Policy](https://privacy.rockymtnwolf.ccwu.cc/usbarc/) or contact [smartwolf@stu.xidian.edu.cn](mailto:smartwolf@stu.xidian.edu.cn).
 
 ## License
 

@@ -13,7 +13,7 @@
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-API%2026-007DFF?style=for-the-badge)](https://developer.huawei.com/consumer/cn/)
 [![设备类型](https://img.shields.io/badge/设备-二合一-3DA5D9?style=for-the-badge)](#兼容性与测试状态)
 [![协议](https://img.shields.io/badge/协议-USB%2FIP-0A7EA4?style=for-the-badge)](https://github.com/vadimgrn/usbip-win2)
-[![可选 DDK](https://img.shields.io/badge/USB%20DDK-可选-6B7280?style=for-the-badge)](docs/PERMISSIONS.md)
+[![可选 DDK](https://img.shields.io/badge/USB%20DDK-可选-6B7280?style=for-the-badge)](#权限)
 
 [源码仓库](https://github.com/RockyMtnWolf/USBArc) · [English](README.md)
 
@@ -52,7 +52,7 @@ DDK 模式读取 USB 速度时，会在取得 USB 授权后临时打开只读 US
 
 前往 [GitHub Releases](https://github.com/RockyMtnWolf/USBArc/releases) 获取未签名 HAP 和发布说明。设备通常要求安装包具有系统接受的签名；请使用自己获准使用的凭据签名。不要分享签名密钥或 Provisioning Profile。
 
-USBManager API 本身不需要 DDK ACL。不过，当前合并版 HAP 无条件声明 `ACCESS_DDK_USB` 和驱动扩展，使用普通 Profile 安装尚未验证，即使选择 USBManager 模式也一样。使用可选 DDK 后端时，签名 Profile 必须包含获批的 `ohos.permission.ACCESS_DDK_USB` ACL。没有该 ACL 时，应从源码移除 DDK 权限和驱动扩展后构建仅 USBManager 版本；该仅管理器配置尚未测试。详见[权限与签名](docs/PERMISSIONS.md)。
+USBManager API 本身不需要 DDK ACL。不过，当前合并版 HAP 无条件声明 `ACCESS_DDK_USB` 和驱动扩展，使用普通 Profile 安装尚未验证，即使选择 USBManager 模式也一样。使用可选 DDK 后端时，签名 Profile 必须包含获批的 `ohos.permission.ACCESS_DDK_USB` ACL。没有该 ACL 时，应从源码移除 DDK 权限和驱动扩展后构建仅 USBManager 版本；该配置尚未测试。
 
 ## 构建
 

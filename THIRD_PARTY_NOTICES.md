@@ -4,7 +4,7 @@ USBArc is distributed under the BSD 3-Clause License in [LICENSE](LICENSE). Thir
 
 | Component | Usage | License / attribution |
 | --- | --- | --- |
-| Lucide icons | Four device-category SVG icons | ISC, with Feather-derived MIT notices; see [asset details](docs/third-party/lucide-icons/README.md) and [original license](docs/third-party/lucide-icons/LICENSE). |
+| Lucide icons | Four device-category SVG icons (`hard-drive`, `cable`, `cpu`, `plug`) from the official Lucide repository; used for storage, serial/CDC/UART, debug probes, and other USB devices. | ISC, with Feather-derived MIT notices. See [Lucide license and attribution](LICENSES/Lucide-LICENSE) and [Lucide](https://lucide.dev/). |
 | MeshArc / TunnelArk | Desktop UI and lifecycle reference | BSD 3-Clause; see [retained notice](LICENSES/TunnelArk-BSD-3-Clause.txt) and [TunnelArk](https://github.com/RockyMtnWolf/TunnelArk). USBArc does not contain its VPN engines. |
 | HarmonyOS SDK / native C++ runtime | Platform APIs and SDK-provided runtime | Distributed subject to the Huawei SDK terms; not relicensed by USBArc. |
 | Hypium and Hamock | Development-only test dependencies | Retain the licenses of their respective OpenHarmony packages; not runtime application dependencies. |
