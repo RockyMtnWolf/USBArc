@@ -212,7 +212,7 @@ const TRANSFER_DRAIN_TIMEOUT_MS: number = 7000;
  * UI policy is deliberately explicit: listDevices never requests rights or shares devices.
  */
 export class UsbIpServerService {
-  private readonly backend: UsbBackendCoordinator = new UsbBackendCoordinator();
+  private readonly backend: UsbBackendCoordinator;
   private settings: UsbIpServerSettings = {
     backendMode: DEFAULT_SETTINGS.backendMode,
     host: DEFAULT_SETTINGS.host, port: DEFAULT_SETTINGS.port,
@@ -226,13 +226,31 @@ export class UsbIpServerService {
   private listeners: Set<Listener> = new Set<Listener>();
   private running: boolean = false;
   private lastError: string = '';
+  private deviceQueryError: string = '';
+  private cachedDeviceMode: 'usbManager' | 'usbDdk' = 'usbManager';
+  private cachedDevices: Array<UsbDeviceInfo> = [];
   private listenerFamilies: Array<'IPv4' | 'IPv6'> = [];
   private refreshTimer: number = -1;
   private deviceRefreshQueue: Promise<void> = Promise.resolve();
 
+  constructor(backend?: UsbBackendCoordinator) {
+    this.backend = backend === undefined ? new UsbBackendCoordinator() : backend;
+    this.cachedDeviceMode = this.backend.currentMode();
+  }
+
   async listDevices(): Promise<Array<UsbDeviceInfo>> {
-    await this.backend.refreshMetadata();
-    return this.overlayImportState(this.backend.listDevices());
+    try {
+      await this.backend.refreshMetadata();
+      const snapshot: Array<UsbDeviceInfo> = this.backend.listDevices();
+      this.rememberDeviceSnapshot(snapshot);
+      this.clearDeviceQueryError();
+      return this.overlayImportState(snapshot);
+    } catch (error) {
+      this.setDeviceQueryError(error as Object);
+      this.publish('error', this.deviceQueryError, false);
+      if (error instanceof Error) throw error;
+      throw new Error(this.errorMessage(error as Object));
+    }
   }
 
   async refreshDevices(): Promise<Array<UsbDeviceInfo>> {
@@ -243,8 +261,17 @@ export class UsbIpServerService {
       snapshot = await this.refreshDevicesInternal();
     });
     this.deviceRefreshQueue = refreshWork.catch((): void => {});
-    await refreshWork;
-    return this.overlayImportState(snapshot);
+    try {
+      await refreshWork;
+      this.rememberDeviceSnapshot(snapshot);
+      this.clearDeviceQueryError();
+      return this.overlayImportState(snapshot);
+    } catch (error) {
+      this.setDeviceQueryError(error as Object);
+      this.publish('error', this.deviceQueryError, false);
+      if (error instanceof Error) throw error;
+      throw new Error(this.errorMessage(error as Object));
+    }
   }
 
   async requestPermission(deviceId: string): Promise<boolean> {
@@ -420,35 +447,44 @@ export class UsbIpServerService {
     if (!this.running && next.backendMode !== this.settings.backendMode) {
       await this.backend.setMode(next.backendMode);
       this.importedOwners.clear();
+      this.cachedDeviceMode = next.backendMode;
+      this.cachedDevices = [];
+      this.deviceQueryError = '';
     }
     this.settings = next;
     this.publish('status', 'USB/IP server settings updated');
   }
 
   getStatus(): UsbIpServerStatus {
+    const devices: Array<UsbDeviceInfo> = this.cachedDeviceMode === this.settings.backendMode ?
+      this.cachedDevices : [];
     return {
       running: this.running,
       host: this.settings.host,
       port: this.settings.port,
       clientCount: this.importedOwners.size,
       sharedDeviceIds: this.running ?
-        this.backend.listDevices().filter((item: UsbDeviceInfo): boolean => isUsbDeviceExportable(item))
+        devices.filter((item: UsbDeviceInfo): boolean => isUsbDeviceExportable(item))
           .map((item: UsbDeviceInfo): string => item.id) : [],
-      occupiedDeviceIds: this.backend.listDevices().filter((item: UsbDeviceInfo): boolean => item.occupied)
+      occupiedDeviceIds: devices.filter((item: UsbDeviceInfo): boolean => item.occupied)
         .map((item: UsbDeviceInfo): string => item.id),
       listenerFamilies: this.listenerFamilies.slice(),
-      lastError: this.lastError
+      lastError: this.reportedError()
     };
   }
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
-    listener({ kind: 'status', message: 'Current USB/IP server state', devices: this.currentDevices(), status: this.getStatus() });
+    try {
+      listener({ kind: 'status', message: 'Current USB/IP server state',
+        devices: this.currentDevices(), status: this.getStatus() });
+    } catch (_error) { }
     return (): void => { this.listeners.delete(listener); };
   }
 
-  private publish(kind: UsbIpServerEventKind, message: string): void {
-    const event: UsbIpServerEvent = { kind, message, devices: this.currentDevices(), status: this.getStatus() };
+  private publish(kind: UsbIpServerEventKind, message: string, querySnapshot: boolean = true): void {
+    const devices: Array<UsbDeviceInfo> = querySnapshot ? this.currentDevices() : this.cachedDeviceSnapshotForDisplay();
+    const event: UsbIpServerEvent = { kind, message, devices, status: this.getStatus() };
     this.listeners.forEach((listener: Listener) => {
       try { listener(event); } catch (_error) { }
     });
@@ -926,8 +962,12 @@ export class UsbIpServerService {
   }
 
   private async refreshDevicesAndPublish(): Promise<void> {
-    await this.refreshDevices();
-    this.publish('devices', 'USB device snapshot refreshed');
+    try {
+      await this.refreshDevices();
+      this.publish('devices', 'USB device snapshot refreshed');
+    } catch (_error) {
+      // refreshDevices publishes the error with the last successful display snapshot.
+    }
   }
 
   private async refreshDevicesInternal(): Promise<Array<UsbDeviceInfo>> {
@@ -948,7 +988,60 @@ export class UsbIpServerService {
   }
 
   private currentDevices(): Array<UsbDeviceInfo> {
-    return this.overlayImportState(this.backend.listDevices());
+    try {
+      const snapshot: Array<UsbDeviceInfo> = this.backend.listDevices();
+      this.rememberDeviceSnapshot(snapshot);
+      this.clearDeviceQueryError();
+      return this.overlayImportState(snapshot);
+    } catch (error) {
+      this.setDeviceQueryError(error as Object);
+      return this.cachedDeviceSnapshotForDisplay();
+    }
+  }
+
+  private rememberDeviceSnapshot(snapshot: Array<UsbDeviceInfo>): void {
+    this.cachedDeviceMode = this.backend.currentMode();
+    this.cachedDevices = this.overlayImportState(snapshot).map((device: UsbDeviceInfo): UsbDeviceInfo => this.copyDevice(device));
+  }
+
+  private cachedDeviceSnapshotForDisplay(): Array<UsbDeviceInfo> {
+    if (this.cachedDeviceMode !== this.settings.backendMode) return [];
+    return this.cachedDevices.map((cached: UsbDeviceInfo): UsbDeviceInfo => {
+      const device: UsbDeviceInfo = this.copyDevice(cached);
+      device.imported = this.importedOwners.has(device.id);
+      device.closing = this.backend.isDeviceClosing(device.id);
+      // Keep selection/occupancy visible while explicitly disabling a stale row after a failed query.
+      device.available = false;
+      return device;
+    });
+  }
+
+  private copyDevice(device: UsbDeviceInfo): UsbDeviceInfo {
+    return {
+      id: device.id, name: device.name, path: device.path, busId: device.busId,
+      busNum: device.busNum, devAddress: device.devAddress, vendorId: device.vendorId,
+      productId: device.productId, speed: device.speed, manufacturer: device.manufacturer,
+      product: device.product, serialNumber: device.serialNumber, version: device.version,
+      deviceClass: device.deviceClass, deviceSubClass: device.deviceSubClass,
+      deviceProtocol: device.deviceProtocol, configurations: device.configurations,
+      backendDeviceId: device.backendDeviceId, opaqueDeviceId: device.opaqueDeviceId,
+      authorized: device.authorized, occupied: device.occupied, shared: device.shared,
+      imported: device.imported, closing: device.closing, available: device.available
+    };
+  }
+
+  private setDeviceQueryError(error: Object): void {
+    this.deviceQueryError = `USB device query failed: ${this.errorMessage(error)}`;
+  }
+
+  private clearDeviceQueryError(): void {
+    this.deviceQueryError = '';
+  }
+
+  private reportedError(): string {
+    if (this.deviceQueryError.length === 0) return this.lastError;
+    if (this.lastError.length === 0) return this.deviceQueryError;
+    return `${this.lastError}; ${this.deviceQueryError}`;
   }
 
   private overlayImportState(devices: Array<UsbDeviceInfo>): Array<UsbDeviceInfo> {

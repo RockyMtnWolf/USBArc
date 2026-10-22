@@ -33,6 +33,7 @@ import {
   usbIpSubmitDirection
 } from '../main/ets/services/UsbIpServer';
 import { UsbDeviceInfo } from '../main/ets/usb/UsbModels';
+import { UsbBackendCoordinator } from '../main/ets/usb/UsbBackendCoordinator';
 
 function makeSubmitHeader(direction: number, endpoint: number, transferLength: number, packetCount: number): Uint8Array {
   const frame: Uint8Array = new Uint8Array(48);
@@ -60,6 +61,42 @@ function testDevice(shared: boolean, occupied: boolean = true, closing: boolean 
     deviceClass: 0, deviceSubClass: 0, deviceProtocol: 0, configurations: [],
     authorized: true, occupied, shared, imported: false, closing, available: true
   };
+}
+
+class SnapshotFailureBackend extends UsbBackendCoordinator {
+  private fakeMode: 'usbManager' | 'usbDdk' = 'usbDdk';
+  unavailable: boolean = true;
+  pruneCalls: number = 0;
+  listCalls: number = 0;
+  rows: Array<UsbDeviceInfo> = [testDevice(true, true)];
+
+  override currentMode(): 'usbManager' | 'usbDdk' {
+    return this.fakeMode;
+  }
+
+  override async setMode(mode: 'usbManager' | 'usbDdk'): Promise<void> {
+    this.fakeMode = mode;
+    if (mode === 'usbManager') this.rows = [];
+  }
+
+  override listDevices(): Array<UsbDeviceInfo> {
+    this.listCalls++;
+    if (this.unavailable) throw new Error('query USB devices failed (platform code 22900001): ExternalDeviceManager service exception');
+    return this.rows;
+  }
+
+  override async refreshMetadata(): Promise<void> {
+    if (this.unavailable) throw new Error('query USB devices failed (platform code 22900001): ExternalDeviceManager service exception');
+  }
+
+  override async pruneMissingDevices(): Promise<Array<string>> {
+    this.pruneCalls++;
+    return [];
+  }
+
+  override isDeviceClosing(_deviceId: string): boolean {
+    return false;
+  }
 }
 
 function testRequest(seqnum: number, direction: number, endpoint: number): UsbIpSubmitRequest {
@@ -249,6 +286,72 @@ export default function UsbIpProtocolTest() {
       expect(usbIpDevidMatchesDevice(highBitWireDevid, 57198, 2)).assertFalse();
       expect(usbIpDevidMatchesDevice(0xdf6e0000, 57198, 1)).assertFalse();
     });
+
+    it('keeps UI subscriptions alive through DDK query failure, retains shared snapshot, and recovers without pruning on failure',
+      0, async (): Promise<void> => {
+        const backend: SnapshotFailureBackend = new SnapshotFailureBackend();
+        const service: UsbIpServerService = new UsbIpServerService(backend);
+        await service.updateSettings({ backendMode: 'usbDdk' });
+        let startupEventDevices: Array<UsbDeviceInfo> = [];
+        let startupError: string = '';
+        const unsubscribeStartup: () => void = service.subscribe((event): void => {
+          startupEventDevices = event.devices;
+          startupError = event.status.lastError;
+        });
+        expect(startupEventDevices.length).assertEqual(0);
+        expect(startupError.includes('22900001')).assertTrue();
+        unsubscribeStartup();
+
+        backend.unavailable = false;
+        const recovered: Array<UsbDeviceInfo> = await service.refreshDevices();
+        expect(recovered.length).assertEqual(1);
+        expect(recovered[0].shared).assertTrue();
+        const successfulPruneCount: number = backend.pruneCalls;
+
+        backend.unavailable = true;
+        let retainedDevices: Array<UsbDeviceInfo> = [];
+        let retainedError: string = '';
+        const listCallsBeforeSubscribe: number = backend.listCalls;
+        service.subscribe((event): void => {
+          retainedDevices = event.devices;
+          retainedError = event.status.lastError;
+        });
+        expect(retainedDevices.length).assertEqual(1);
+        expect(retainedDevices[0].shared).assertTrue();
+        expect(retainedDevices[0].occupied).assertTrue();
+        expect(retainedDevices[0].available).assertFalse();
+        expect(retainedError.includes('22900001')).assertTrue();
+
+        const listCallsBeforeStatus: number = backend.listCalls;
+        const status = service.getStatus();
+        expect(backend.listCalls).assertEqual(listCallsBeforeStatus);
+        expect(status.occupiedDeviceIds.length).assertEqual(1);
+
+        let refreshRejected: boolean = false;
+        try { await service.refreshDevices(); } catch (_error) { refreshRejected = true; }
+        expect(refreshRejected).assertTrue();
+        expect(backend.pruneCalls).assertEqual(successfulPruneCount);
+        expect(backend.listCalls).assertEqual(listCallsBeforeSubscribe + 1);
+
+        backend.unavailable = false;
+        const recoveredAgain: Array<UsbDeviceInfo> = await service.refreshDevices();
+        expect(recoveredAgain[0].shared).assertTrue();
+        expect(service.getStatus().lastError).assertEqual('');
+      });
+
+    it('isolates cached display rows when switching backend mode and tolerates a throwing initial subscriber', 0,
+      async (): Promise<void> => {
+        const backend: SnapshotFailureBackend = new SnapshotFailureBackend();
+        backend.unavailable = false;
+        const service: UsbIpServerService = new UsbIpServerService(backend);
+        await service.updateSettings({ backendMode: 'usbDdk' });
+        await service.refreshDevices();
+        backend.unavailable = true;
+        await service.updateSettings({ backendMode: 'usbManager' });
+        expect(service.getStatus().occupiedDeviceIds.length).assertEqual(0);
+        const unsubscribe: () => void = service.subscribe((_event): void => { throw new Error('observer failure'); });
+        unsubscribe();
+      });
 
     it('builds successful cancellation and submit reply headers with zero server basic fields', 0, () => {
       const service: UsbIpServerService = new UsbIpServerService();
