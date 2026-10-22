@@ -28,6 +28,7 @@ import {
 } from '../main/ets/usb/UsbDdkBackend';
 import { mapUsbManagerClaimError } from '../main/ets/usb/UsbManagerBackend';
 import { DdkConfigurationDescriptor, DdkDeviceDescriptor, DdkSystemDeviceInfo } from '../main/ets/services/DdkDriverClient';
+import { makeDdkProbeDeviceId } from '../main/ets/services/DdkReadOnlyProbe';
 
 function configFixture(): DdkConfigurationDescriptor {
   return {
@@ -61,6 +62,14 @@ function descriptor(id: string, vendorId: number, productId: number): DdkDeviceD
 
 export default function DdkDriverClientHelpersTest() {
   describe('DdkDriverClientHelpersTest', () => {
+    it('constructs exact uint64 DDK IDs from safe USBManager bus and address values', 0, () => {
+      expect(makeDdkProbeDeviceId(1, 6)).assertEqual('4294967302');
+      expect(makeDdkProbeDeviceId(0x1fffff, 127)).assertEqual('9007194959773823');
+      expect(makeDdkProbeDeviceId(0x200000, 1)).assertEqual(undefined);
+      expect(makeDdkProbeDeviceId(1.5, 1)).assertEqual(undefined);
+      expect(makeDdkProbeDeviceId(1, 128)).assertEqual(undefined);
+    });
+
     it('decodes real UTF16 USB product strings and refuses malformed descriptors', 0, () => {
       expect(decodeDdkUsbString([8, 3, 67, 0, 72, 0, 52, 0])).assertEqual('CH4');
       expect(decodeDdkUsbString([4, 3, 0x2d, 0x4e])).assertEqual('中');

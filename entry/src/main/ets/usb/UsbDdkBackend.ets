@@ -22,6 +22,7 @@ import {
 } from './UsbModels';
 import { UsbBackendError } from './UsbManagerBackend';
 import { readUsbNegotiatedSpeed } from '../services/UsbNegotiatedSpeed';
+import { startDdkReadOnlyProbe } from '../services/DdkReadOnlyProbe';
 import {
   mergeUsbDisplayMetadata,
   selectUsbManagerMetadata,
@@ -272,6 +273,7 @@ export class UsbDdkBackend {
   private closingIds: Set<string> = new Set<string>();
   private unavailableIds: Set<string> = new Set<string>();
   private removedIds: Array<string> = [];
+  private readOnlyProbeAttemptedIds: Set<string> = new Set<string>();
 
   constructor(client: DdkDriverClient = new DdkDriverClient()) {
     this.client = client;
@@ -390,7 +392,17 @@ export class UsbDdkBackend {
       }
       throw new DdkDriverClientError('DDK driver stopped or is unavailable; retry the connection request', -16, -16);
     }
-    await this.client.bind(systemDeviceId);
+    try {
+      await this.client.bind(systemDeviceId);
+    } catch (error) {
+      try {
+        this.scheduleReadOnlyProbe(system);
+      } catch (_probeError) {
+        // Keep the original bind error authoritative.
+      }
+      if (error instanceof Error) throw error;
+      throw new DdkDriverClientError('DDK driver binding failed', -5, -5);
+    }
     try {
       const opaqueIds: Array<string> = await this.client.getDriverDeviceIds(systemDeviceId);
       const descriptors: Array<DdkDeviceDescriptor> = [];
@@ -451,6 +463,23 @@ export class UsbDdkBackend {
       if (error instanceof DdkDriverClientError) throw error;
       throw new DdkDriverClientError('Could not resolve selected DDK device identity', -5, -5);
     }
+  }
+
+  private scheduleReadOnlyProbe(system: DdkSystemDeviceInfo): void {
+    const currentManagerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
+      system.vendorId, system.productId, system.description, readUsbManagerMetadata());
+    // A fresh, exact USBManager row is required; never probe a stale DDK enumeration entry.
+    if (currentManagerMetadata === undefined) return;
+    const probeKey: string = `${currentManagerMetadata.busNum}-${currentManagerMetadata.devAddress}-` +
+      `${currentManagerMetadata.vendorId}-${currentManagerMetadata.productId}`;
+    if (this.readOnlyProbeAttemptedIds.has(probeKey)) return;
+    const started: boolean = startDdkReadOnlyProbe({
+      busNum: currentManagerMetadata.busNum,
+      devAddress: currentManagerMetadata.devAddress,
+      vendorId: currentManagerMetadata.vendorId,
+      productId: currentManagerMetadata.productId
+    });
+    if (started) this.readOnlyProbeAttemptedIds.add(probeKey);
   }
 
   private async readDeviceStrings(systemDeviceId: number, descriptor: DdkDeviceDescriptor): Promise<Array<string>> {
