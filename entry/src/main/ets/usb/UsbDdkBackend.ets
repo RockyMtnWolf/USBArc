@@ -1,3 +1,4 @@
+import { usbManager } from '@kit.BasicServicesKit';
 import {
   DdkConfigurationDescriptor,
   DdkDeviceDescriptor,
@@ -21,6 +22,12 @@ import {
 } from './UsbModels';
 import { UsbBackendError } from './UsbManagerBackend';
 import { readUsbNegotiatedSpeed } from '../services/UsbNegotiatedSpeed';
+import {
+  mergeUsbDisplayMetadata,
+  selectUsbManagerMetadata,
+  UsbDisplayMetadata,
+  UsbManagerDeviceMetadata
+} from './UsbDeviceMetadata';
 
 export function makeDdkUsbIpBusId(ddkDeviceId: string): string {
   if (!/^\d{1,20}$/.test(ddkDeviceId)) {
@@ -188,11 +195,33 @@ function bcdVersion(value: number): string {
   return `${major}.${minor}`;
 }
 
-function makeSystemRow(system: DdkSystemDeviceInfo): UsbDeviceInfo {
+function readUsbManagerMetadata(): Array<UsbManagerDeviceMetadata> {
+  try {
+    return usbManager.getDevices().map((device: usbManager.USBDevice): UsbManagerDeviceMetadata => ({
+      vendorId: device.vendorId,
+      productId: device.productId,
+      busNum: device.busNum,
+      devAddress: device.devAddress,
+      manufacturerName: device.manufacturerName,
+      productName: device.productName,
+      serialNumber: device.serial ?? ''
+    }));
+  } catch (_error) {
+    // Metadata is optional; DDK enumeration and connection remain independent.
+    return [];
+  }
+}
+
+function makeSystemRow(system: DdkSystemDeviceInfo, managerDevices: ReadonlyArray<UsbManagerDeviceMetadata>): UsbDeviceInfo {
   const id: string = `ddk-system-${system.deviceId}`;
+  const managerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
+    system.vendorId, system.productId, system.description, managerDevices);
+  const display: UsbDisplayMetadata = mergeUsbDisplayMetadata(managerMetadata, {
+    manufacturer: '', product: '', serialNumber: ''
+  });
   return {
     id,
-    name: ddkDisplayName('', system.description, system.vendorId, system.productId),
+    name: ddkDisplayName(display.product, system.description, system.vendorId, system.productId),
     path: '',
     busId: `ddk-system-${system.deviceId}`,
     busNum: 0,
@@ -200,9 +229,9 @@ function makeSystemRow(system: DdkSystemDeviceInfo): UsbDeviceInfo {
     vendorId: system.vendorId,
     productId: system.productId,
     speed: 0,
-    manufacturer: '',
-    product: '',
-    serialNumber: '',
+    manufacturer: display.manufacturer,
+    product: display.product,
+    serialNumber: display.serialNumber,
     version: '',
     deviceClass: 0,
     deviceSubClass: 0,
@@ -216,6 +245,22 @@ function makeSystemRow(system: DdkSystemDeviceInfo): UsbDeviceInfo {
     closing: false,
     available: true
   };
+}
+
+function applyDisplayMetadata(
+  row: UsbDeviceInfo,
+  system: DdkSystemDeviceInfo,
+  managerDevices: ReadonlyArray<UsbManagerDeviceMetadata>
+): void {
+  const managerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
+    system.vendorId, system.productId, system.description, managerDevices);
+  const display: UsbDisplayMetadata = mergeUsbDisplayMetadata(managerMetadata, {
+    manufacturer: row.manufacturer, product: row.product, serialNumber: row.serialNumber
+  });
+  row.manufacturer = display.manufacturer;
+  row.product = display.product;
+  row.serialNumber = display.serialNumber;
+  row.name = ddkDisplayName(display.product, system.description, system.vendorId, system.productId);
 }
 
 export class UsbDdkBackend {
@@ -289,10 +334,14 @@ export class UsbDdkBackend {
   }
 
   listDevices(): Array<UsbDeviceInfo> {
-    return this.client.listSystemDevices().map((system: DdkSystemDeviceInfo): UsbDeviceInfo => {
+    const systems: Array<DdkSystemDeviceInfo> = this.client.listSystemDevices();
+    const managerDevices: Array<UsbManagerDeviceMetadata> = readUsbManagerMetadata();
+    return systems.map((system: DdkSystemDeviceInfo): UsbDeviceInfo => {
       const id: string = `ddk-system-${system.deviceId}`;
       const selected: UsbDeviceInfo | undefined = this.selected.get(id);
-      const row: UsbDeviceInfo = selected === undefined ? makeSystemRow(system) : this.copyInfo(selected);
+      const row: UsbDeviceInfo = selected === undefined ? makeSystemRow(system, managerDevices) : this.copyInfo(selected);
+      applyDisplayMetadata(row, system, managerDevices);
+      if (selected !== undefined) this.selected.set(id, this.copyInfo(row));
       const handle: UsbDdkDeviceHandle | undefined = this.handles.get(id);
       const unavailable: boolean = this.unavailableIds.has(id);
       row.authorized = selected !== undefined && !unavailable;
@@ -314,6 +363,9 @@ export class UsbDdkBackend {
     const system: DdkSystemDeviceInfo | undefined = this.client.listSystemDevices().find(
       (item: DdkSystemDeviceInfo): boolean => item.deviceId === systemDeviceId);
     if (system === undefined) throw new DdkDriverClientError('Selected USB device is no longer present', -19, -19);
+    // Read only the manager's descriptor snapshot before binding; do not request rights or open a pipe here.
+    const managerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
+      system.vendorId, system.productId, system.description, readUsbManagerMetadata());
     const publicId: string = `ddk-system-${systemDeviceId}`;
     const previouslySelected: UsbDeviceInfo | undefined = this.selected.get(publicId);
     if (previouslySelected !== undefined && previouslySelected.authorized &&
@@ -322,6 +374,7 @@ export class UsbDdkBackend {
         const health: DdkDriverHealth = await this.client.checkHealth(systemDeviceId);
         if (health === 'healthy') {
           this.unavailableIds.delete(publicId);
+          applyDisplayMetadata(previouslySelected, system, managerMetadata === undefined ? [] : [managerMetadata]);
           if (previouslySelected.speed === 0 && !this.handles.has(publicId)) {
             previouslySelected.speed = await readUsbNegotiatedSpeed(system.vendorId, system.productId, true);
           }
@@ -360,9 +413,12 @@ export class UsbDdkBackend {
       const orderedConfigurations: Array<UsbConfigurationInfo> =
         activeConfigurationFirst(configurations, activeConfigurationValue);
       const strings: Array<string> = await this.readDeviceStrings(systemDeviceId, descriptor);
+      const display = mergeUsbDisplayMetadata(managerMetadata, {
+        manufacturer: strings[0], product: strings[1], serialNumber: strings[2]
+      });
       const info: UsbDeviceInfo = {
         id: `ddk-system-${systemDeviceId}`,
-        name: ddkDisplayName(strings[1], system.description, descriptor.vendorId, descriptor.productId),
+        name: ddkDisplayName(display.product, system.description, descriptor.vendorId, descriptor.productId),
         path: `ddk/${descriptor.id}`,
         busId,
         busNum: logicalBusNumber,
@@ -370,9 +426,9 @@ export class UsbDdkBackend {
         vendorId: descriptor.vendorId,
         productId: descriptor.productId,
         speed: await readUsbNegotiatedSpeed(descriptor.vendorId, descriptor.productId, true),
-        manufacturer: strings[0],
-        product: strings[1],
-        serialNumber: strings[2],
+        manufacturer: display.manufacturer,
+        product: display.product,
+        serialNumber: display.serialNumber,
         version: bcdVersion(descriptor.bcdDevice),
         deviceClass: descriptor.deviceClass,
         deviceSubClass: descriptor.deviceSubClass,

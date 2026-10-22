@@ -1,6 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
   classifyDdkDriverHealth,
+  formatDdkPlatformErrorMessage,
   getDdkTransferExpectation,
   isValidDdkTransferResult,
   mapDdkUsbErrno,
@@ -25,6 +26,7 @@ import {
   parseDdkConfigurationDescriptor,
   selectUniqueDdkMatch
 } from '../main/ets/usb/UsbDdkBackend';
+import { mapUsbManagerClaimError } from '../main/ets/usb/UsbManagerBackend';
 import { DdkConfigurationDescriptor, DdkDeviceDescriptor, DdkSystemDeviceInfo } from '../main/ets/services/DdkDriverClient';
 
 function configFixture(): DdkConfigurationDescriptor {
@@ -226,5 +228,24 @@ export default function DdkDriverClientHelpersTest() {
       expect(mapDdkUsbErrno(201)).assertEqual(-13);
       expect(mapDdkUsbErrno(-90)).assertEqual(-90);
     });
+
+    it('maps documented manager claim failures without calling driver errors busy', 0, () => {
+      expect(mapUsbManagerClaimError(88080389)).assertEqual(-19);
+      expect(mapUsbManagerClaimError(88080486)).assertEqual(-11);
+      expect(mapUsbManagerClaimError(88080488)).assertEqual(-13);
+      expect(mapUsbManagerClaimError(-1)).assertEqual(-5);
+      expect(mapUsbManagerClaimError(401)).assertEqual(-22);
+      expect(mapUsbManagerClaimError(801)).assertEqual(-95);
+      expect(mapUsbManagerClaimError(987654)).assertEqual(-5);
+    });
+
+    it('keeps ExternalDeviceManager platform codes visible in bind errors', 0, () => {
+      expect(mapDdkUsbErrno(22900001)).assertEqual(-5);
+      expect(mapDdkUsbErrno(26300001)).assertEqual(-5);
+      expect(formatDdkPlatformErrorMessage('bind DDK driver', 22900001,
+        'ExternalDeviceManager service exception')).assertEqual(
+        'bind DDK driver failed (platform code 22900001): ExternalDeviceManager service exception');
+    });
+
   });
 }

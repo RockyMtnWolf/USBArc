@@ -93,6 +93,17 @@ function businessErrorCode(error: Object): number {
   return item.code;
 }
 
+/** Maps the API 26 usbManager.claimInterface result codes to Linux-style USB/IP errors. */
+export function mapUsbManagerClaimError(code: number): number {
+  if (code === 88080389) return -19; // USB service stopped or device is absent.
+  if (code === 88080486) return -11; // USB service is initializing; caller may retry.
+  if (code === 88080488) return -13; // Permission not granted.
+  if (code === -1) return -5; // SDK documents this as a driver error, not busy.
+  if (code === 401) return -22; // BusinessError parameter error.
+  if (code === 801) return -95; // Capability is unsupported.
+  return -5;
+}
+
 export class UsbManagerBackend {
   private handles: Map<string, UsbManagerDeviceHandle> = new Map<string, UsbManagerDeviceHandle>();
   private closingIds: Set<string> = new Set<string>();
@@ -322,7 +333,9 @@ export class UsbManagerBackend {
           }
           const claimResult: number = usbManager.claimInterface(pipe, rawInterface, forceClaim);
           if (claimResult !== 0) {
-            throw new UsbBackendError(`USB interface ${targetInfo.id} is busy (claim ${claimResult})`, -16);
+            throw new UsbBackendError(
+              `USB interface ${targetInfo.id} claim failed (USB SDK code ${claimResult})`,
+              mapUsbManagerClaimError(claimResult));
           }
           handle.claimedRawInterfaces.push(rawInterface);
           handle.claimedInterfaces.push(rawInterface.id);
@@ -495,12 +508,14 @@ export class UsbManagerBackend {
     if (result !== 0) return this.mapUsbError(result);
     handle.activeConfigurationId = config.id;
     let claimFailed: boolean = false;
+    let claimFailureStatus: number = -5;
     const claimedIds: Set<number> = new Set<number>();
     rawConfig.interfaces.forEach((iface: usbManager.USBInterface) => {
       if (claimFailed || iface.alternateSetting !== 0 || claimedIds.has(iface.id)) return;
       const claimResult: number = usbManager.claimInterface(handle.pipe, iface, forceClaim);
       if (claimResult !== 0) {
         claimFailed = true;
+        claimFailureStatus = mapUsbManagerClaimError(claimResult);
         return;
       }
       handle.claimedRawInterfaces.push(iface);
@@ -515,7 +530,7 @@ export class UsbManagerBackend {
       handle.claimedRawInterfaces = [];
       handle.claimedInterfaces = [];
       handle.activeAlternates.clear();
-      return -16;
+      return claimFailureStatus;
     }
     return 0;
   }

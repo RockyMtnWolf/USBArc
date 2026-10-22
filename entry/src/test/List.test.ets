@@ -4,6 +4,7 @@ import LocalNetworkAddressesTest from './LocalNetworkAddresses.test';
 import DdkDriverClientHelpersTest from './DdkDriverClientHelpers.test';
 import UsbNegotiatedSpeedTest from './UsbNegotiatedSpeed.test';
 import UsbHubClassificationTest from './UsbHubClassification.test';
+import UsbDeviceMetadataTest from './UsbDeviceMetadata.test';
 
 export default function testsuite() {
   UsbIpProtocolTest();
@@ -12,4 +13,5 @@ export default function testsuite() {
   DdkDriverClientHelpersTest();
   UsbNegotiatedSpeedTest();
   UsbHubClassificationTest();
+  UsbDeviceMetadataTest();
 }

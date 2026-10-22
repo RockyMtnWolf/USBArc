@@ -136,10 +136,15 @@ export function mapDdkUsbErrno(status: number): number {
   if (status === 201 || status === 26300002) return -13;
   if (status === 401) return -22;
   if (status === 26300003 || status === 27400002) return -19;
+  if (status === 22900001 || status === 26300001) return -5;
   if (status === 27400004) return -110;
   if (status === 27400001) return -12;
   if (status === 27400003) return -5;
   return -5;
+}
+
+export function formatDdkPlatformErrorMessage(operation: string, status: number, detail: string): string {
+  return `${operation} failed (platform code ${status}): ${detail}`;
 }
 
 export function normalizeDdkTimeout(timeoutMs: number): number {
@@ -539,6 +544,7 @@ export class DdkDriverClient {
     const businessError: BusinessError = error as BusinessError;
     const status: number = businessError.code ?? -5;
     const detail: string = businessError.message ?? String(error);
-    return new DdkDriverClientError(`${operation}: ${detail}`, status, mapDdkUsbErrno(status));
+    return new DdkDriverClientError(formatDdkPlatformErrorMessage(operation, status, detail), status,
+      mapDdkUsbErrno(status));
   }
 }
