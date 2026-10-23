@@ -25,7 +25,7 @@ USBArc shares USB peripherals connected to a HarmonyOS 2-in-1 computer over USB/
 
 ## Features
 
-- **Two explicit device backends:** USBManager is the ordinary-app path. The optional DDK backend requires an authorized signing profile and uses direct NDK calls from an ArkTS Worker; this experimental path awaits real-device validation and never silently falls back to USBManager.
+- **Two explicit device backends:** USBManager is the ordinary-app path. The optional DDK backend requires an authorized signing profile and uses direct NDK calls from an ArkTS Worker; it remains experimental and never silently falls back to USBManager.
 - **User-controlled access:** request USB system authorization manually or enable automatic requests. Automatic mode only asks the system and never approves a device silently. Automatic sharing can target all devices or saved VID/PID rules.
 - **Desktop workflow:** adaptive device cards, live server and client state, tray controls, and close-to-tray behavior.
 - **Network visibility:** shows detected local IPv4 and IPv6 addresses separately from the configured bind address. The UI reports the address families actually bound by the server.
@@ -47,6 +47,8 @@ The intended peripherals include USB storage, J-Link, ST-Link, USB-to-TTL adapte
 Earlier DDK testing on a HUAWEI MateBook Pro S with API 26 exercised a CH340 USB-to-serial adapter and an ST-Link V2. Windows reported both devices with PnP `ProblemCode 0`; the user also confirmed a successful STM32CubeProgrammer read through ST-Link. An initial ST-Link attach timeout was observed and remains under investigation. Those runs predate the current Worker-based DDK implementation and do not validate it. They cover only the devices and setup used at the time.
 
 In a separate USBManager storage test this round, sharing failed with Force Claim off. The user enabled Force Claim and sharing succeeded; after turning it off, sharing succeeded again. This supports an earlier interface-ownership conflict in that case. Only the server-side sharing stage was verified; there was no Windows client attach, disk access, or file transfer, so USB storage data transfer remains unverified.
+
+The current Worker-based DDK build has since been confirmed by the user on real hardware to connect to and share the Kingston 0951:1666 storage device and a Realtek RTL9210B enclosure at the USBArc server. This confirms only the device connection and server-side sharing stage for those devices. A USB/IP client attach, disk I/O, file transfer, and broader device compatibility remain unverified.
 
 DDK mode reports USB speed only after a temporary, read-only USBManager pipe is opened with USB authorization; that pipe is closed immediately, and USB claiming and data transfers remain on DDK. If this speed query is unavailable, the device is not exported because the tested Windows client rejects an unknown speed.
 
@@ -108,7 +110,7 @@ USB device authorization, DDK access, background tasks, and network listening ar
 | `ohos.permission.KEEP_BACKGROUND_RUNNING` | Normal, system-grant | Request supported background tasks; the system can decline or cancel them. |
 | `ohos.permission.ACCESS_DDK_USB` | System-basic, system-grant, restricted ACL | USB DDK access; requires an approved signing-profile ACL. |
 
-These classifications are from the API 26 SDK. The manifest no longer requests `ACCESS_EXTENSIONAL_DEVICE_DRIVER`. The experimental DDK backend calls NDK APIs directly from an ArkTS Worker rather than registering a `DriverExtensionAbility`; the official DriverExtension guide describes a separate workflow and does not establish support for this Worker architecture or compatibility across devices. The DDK path still requires its approved `ACCESS_DDK_USB` ACL and awaits real-device validation. USBManager authorization is a separate per-device system request, not a manifest permission. A manager-only build would omit `ACCESS_DDK_USB`; that configuration has not been tested. Background-task confirmation and TCP inbound/firewall policy are also separate from manifest permissions. See [Privacy Policy](https://privacy.rockymtnwolf.ccwu.cc/usbarc/) or contact [smartwolf@stu.xidian.edu.cn](mailto:smartwolf@stu.xidian.edu.cn).
+These classifications are from the API 26 SDK. The manifest no longer requests `ACCESS_EXTENSIONAL_DEVICE_DRIVER`. The experimental DDK backend calls NDK APIs directly from an ArkTS Worker rather than registering a `DriverExtensionAbility`; the official DriverExtension guide describes a separate workflow and does not establish support for this Worker architecture or compatibility across devices. The DDK path still requires its approved `ACCESS_DDK_USB` ACL; limited server-side hardware results are described above. USBManager authorization is a separate per-device system request, not a manifest permission. A manager-only build would omit `ACCESS_DDK_USB`; that configuration has not been tested. Background-task confirmation and TCP inbound/firewall policy are also separate from manifest permissions. See [Privacy Policy](https://privacy.rockymtnwolf.ccwu.cc/usbarc/) or contact [smartwolf@stu.xidian.edu.cn](mailto:smartwolf@stu.xidian.edu.cn).
 
 ## License
 

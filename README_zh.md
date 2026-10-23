@@ -25,7 +25,7 @@ USBArc 通过 USB/IP 1.1.1 共享连接到 HarmonyOS 二合一电脑的 USB 外�
 
 ## 功能
 
-- **两种明确的设备后端：**普通应用路径为 USBManager；可选 DDK 后端需要获批 ACL 的签名 Profile，并由 ArkTS Worker 直接调用 NDK API。该实验路径仍待实机验证，且不会在 DDK 不可用时静默回退到 USBManager。
+- **两种明确的设备后端：**普通应用路径为 USBManager；可选 DDK 后端需要获批 ACL 的签名 Profile，并由 ArkTS Worker 直接调用 NDK API。该路径仍属实验性质，且不会在 DDK 不可用时静默回退到 USBManager。
 - **由用户控制访问：**可手动请求 USB 系统授权，也可启用自动请求。自动模式只向系统申请，不会静默批准设备。自动共享可选择全部设备或已保存的 VID/PID 规则。
 - **桌面工作流：**自适应设备卡片、实时服务端和客户端状态、系统托盘与关闭到托盘。
 - **网络地址显示：**分别显示检测到的本机 IPv4、IPv6 地址和监听配置；界面按服务端实际绑定的地址族报告监听状态。
@@ -47,6 +47,8 @@ USBArc 通过 USB/IP 1.1.1 共享连接到 HarmonyOS 二合一电脑的 USB 外�
 此前曾在 API 26 的 HUAWEI MateBook Pro S 上使用旧版 DDK 实现测试 CH340 USB 转串口和 ST-Link V2。Windows 对两台设备均报告 PnP `ProblemCode 0`；用户也确认通过 ST-Link 使用 STM32CubeProgrammer 成功读取。首次 ST-Link 连接曾出现超时，原因和复现情况仍在观察中。这些测试早于当前 Worker DDK 实现，不能验证当前实现；结果也仅适用于当时的设备与环境。
 
 本轮另用 USBManager 测试 USB 存储共享：关闭强制接管时失败，用户显式开启后成功共享；随后关闭开关再次共享也成功。这支持初次失败时接口已被占用的判断。本轮只验证了服务端共享阶段，没有进行 Windows 客户端连接、磁盘访问或文件传输，因此 USB 存储数据传输仍未验证。
+
+之后，用户在实机确认当前 Worker DDK 版本可连接 Kingston 0951:1666 存储设备和 Realtek RTL9210B 盒子，并在 USBArc 服务端完成共享。这只确认了这两台设备的连接与服务端共享阶段；USB/IP 客户端连接、磁盘 I/O、文件传输及更广泛的设备兼容性仍未验证。
 
 DDK 模式读取 USB 速度时，会在取得 USB 授权后临时打开只读 USBManager pipe，读取后立即关闭；USB 接口占用和数据传输仍由 DDK 完成。如果无法读取速度，设备不会导出，因为已测试的 Windows 客户端不接受未知速度。
 
@@ -108,7 +110,7 @@ USB 设备授权、可选 DDK 访问、后台任务请求和网络监听是相�
 | `ohos.permission.KEEP_BACKGROUND_RUNNING` | Normal，系统授予 | 请求受支持的后台任务；系统可拒绝或取消。 |
 | `ohos.permission.ACCESS_DDK_USB` | System-basic，系统授予，受限 ACL | 访问 USB DDK；需要获批的签名 Profile ACL。 |
 
-manifest 不再声明 `ACCESS_EXTENSIONAL_DEVICE_DRIVER`。当前实验性 DDK Worker 直接调用 NDK API，而不是通过 `DriverExtensionAbility` 白名单流程；官方 DriverExtension 指南描述的是另一套架构，不能作为 Worker 受平台支持或兼容所有设备的证据。DDK ACL 仍需实机验证。USBManager 授权是独立的逐设备系统请求，不是 manifest 权限；仅 USBManager 的构建应移除 `ACCESS_DDK_USB`，但该配置尚未测试。后台任务确认和 TCP 入站/防火墙策略也独立于 manifest 权限。
+manifest 不再声明 `ACCESS_EXTENSIONAL_DEVICE_DRIVER`。当前实验性 DDK Worker 直接调用 NDK API，而不是通过 `DriverExtensionAbility` 白名单流程；官方 DriverExtension 指南描述的是另一套架构，不能作为 Worker 受平台支持或兼容所有设备的证据。DDK ACL 仍需获批；有限的实机服务端共享结果见上文。USBManager 授权是独立的逐设备系统请求，不是 manifest 权限；仅 USBManager 的构建应移除 `ACCESS_DDK_USB`，但该配置尚未测试。后台任务确认和 TCP 入站/防火墙策略也独立于 manifest 权限。
 
 ## 许可证
 
