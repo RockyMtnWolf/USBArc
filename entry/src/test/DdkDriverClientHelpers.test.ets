@@ -5,6 +5,9 @@ import {
   getDdkTransferExpectation,
   isValidDdkTransferResult,
   mapDdkUsbErrno,
+  makeDdkProbeDeviceId,
+  makeDdkPhysicalDeviceId,
+  getDdkPhysicalBusAddress,
   normalizeDdkTimeout,
   validateDdkTransferRequest
 } from '../main/ets/services/DdkDriverClient';
@@ -28,7 +31,6 @@ import {
 } from '../main/ets/usb/UsbDdkBackend';
 import { mapUsbManagerClaimError } from '../main/ets/usb/UsbManagerBackend';
 import { DdkConfigurationDescriptor, DdkDeviceDescriptor, DdkSystemDeviceInfo } from '../main/ets/services/DdkDriverClient';
-import { makeDdkProbeDeviceId } from '../main/ets/services/DdkReadOnlyProbe';
 
 function configFixture(): DdkConfigurationDescriptor {
   return {
@@ -63,11 +65,25 @@ function descriptor(id: string, vendorId: number, productId: number): DdkDeviceD
 export default function DdkDriverClientHelpersTest() {
   describe('DdkDriverClientHelpersTest', () => {
     it('constructs exact uint64 DDK IDs from safe USBManager bus and address values', 0, () => {
+      expect(makeDdkPhysicalDeviceId(1, 6)).assertEqual(4294967302);
+      expect(makeDdkPhysicalDeviceId(0x1fffff, 127)).assertEqual(9007194959773823);
+      expect(makeDdkPhysicalDeviceId(0x200000, 1)).assertEqual(undefined);
+      expect(getDdkPhysicalBusAddress(4294967302)?.busNum).assertEqual(1);
+      expect(getDdkPhysicalBusAddress(4294967302)?.devAddress).assertEqual(6);
       expect(makeDdkProbeDeviceId(1, 6)).assertEqual('4294967302');
       expect(makeDdkProbeDeviceId(0x1fffff, 127)).assertEqual('9007194959773823');
       expect(makeDdkProbeDeviceId(0x200000, 1)).assertEqual(undefined);
       expect(makeDdkProbeDeviceId(1.5, 1)).assertEqual(undefined);
       expect(makeDdkProbeDeviceId(1, 128)).assertEqual(undefined);
+    });
+
+    it('uses the exact physical ID to select one of several identical VID PID devices', 0, () => {
+      const system: DdkSystemDeviceInfo = {
+        deviceId: 4294967302, vendorId: 0x0951, productId: 0x1666, description: 'Kingston'
+      };
+      const selected: DdkDeviceDescriptor = descriptor('4294967302', 0x0951, 0x1666);
+      const otherSameModel: DdkDeviceDescriptor = descriptor('8589934594', 0x0951, 0x1666);
+      expect(selectUniqueDdkMatch(system, [otherSameModel, selected]).id).assertEqual('4294967302');
     });
 
     it('decodes real UTF16 USB product strings and refuses malformed descriptors', 0, () => {

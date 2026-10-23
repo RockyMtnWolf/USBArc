@@ -8,7 +8,7 @@
 
 **A native USB/IP server for HarmonyOS 2-in-1 devices.**
 
-> **DDK signing requirement:** USB DDK is an optional runtime backend, but the current combined HAP unconditionally declares both `ohos.permission.ACCESS_DDK_USB` and `ohos.permission.ACCESS_EXTENSIONAL_DEVICE_DRIVER`. Installation of this combined package with an ordinary profile, even when using USBManager mode, has not been verified. Selecting USBManager does not remove the DDK ACL requirement. Without an approved DDK ACL, a manager-only source build would need to remove the DDK permission and driver extension; that configuration has not been tested.
+> **DDK access requirement:** The combined HAP declares `ohos.permission.ACCESS_DDK_USB`, which requires an approved signing-profile ACL for the DDK backend. Installation of this combined package with an ordinary profile remains unverified, even in USBManager mode. The current experimental DDK backend calls NDK APIs directly from an ArkTS Worker; it is not a `DriverExtensionAbility` implementation. The official DriverExtension guide does not establish support for this Worker architecture or compatibility across devices. USBManager itself does not require the DDK ACL; a manager-only build would omit `ACCESS_DDK_USB`, and that configuration has not been tested.
 
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-API%2026-007DFF?style=for-the-badge)](https://developer.huawei.com/consumer/en/)
 [![Device class](https://img.shields.io/badge/Device-2--in--1-3DA5D9?style=for-the-badge)](#compatibility)
@@ -25,7 +25,7 @@ USBArc shares USB peripherals connected to a HarmonyOS 2-in-1 computer over USB/
 
 ## Features
 
-- **Two explicit device backends:** USBManager is the ordinary-app path. USB DDK is an optional backend that requires an authorized signing profile; it never silently falls back to USBManager.
+- **Two explicit device backends:** USBManager is the ordinary-app path. The optional DDK backend requires an authorized signing profile and uses direct NDK calls from an ArkTS Worker; this experimental path awaits real-device validation and never silently falls back to USBManager.
 - **User-controlled access:** request USB system authorization manually or enable automatic requests. Automatic mode only asks the system and never approves a device silently. Automatic sharing can target all devices or saved VID/PID rules.
 - **Desktop workflow:** adaptive device cards, live server and client state, tray controls, and close-to-tray behavior.
 - **Network visibility:** shows detected local IPv4 and IPv6 addresses separately from the configured bind address. The UI reports the address families actually bound by the server.
@@ -44,7 +44,9 @@ The intended peripherals include USB storage, J-Link, ST-Link, USB-to-TTL adapte
 | USB/IP protocol | 1.1.1 |
 | Isochronous transfers | Not supported |
 
-Recent testing on a HUAWEI MateBook Pro S with API 26 exercised the DDK path with a CH340 USB-to-serial adapter and an ST-Link V2. Windows reported both devices with PnP `ProblemCode 0`; the user also confirmed a successful STM32CubeProgrammer read through ST-Link. An initial ST-Link attach timeout was observed and remains under investigation. These results cover those devices and that setup only. USB storage and other device models, other HarmonyOS device types, and broad transfer compatibility have not been established.
+Earlier DDK testing on a HUAWEI MateBook Pro S with API 26 exercised a CH340 USB-to-serial adapter and an ST-Link V2. Windows reported both devices with PnP `ProblemCode 0`; the user also confirmed a successful STM32CubeProgrammer read through ST-Link. An initial ST-Link attach timeout was observed and remains under investigation. Those runs predate the current Worker-based DDK implementation and do not validate it. They cover only the devices and setup used at the time.
+
+In a separate USBManager storage test this round, sharing failed with Force Claim off. The user enabled Force Claim and sharing succeeded; after turning it off, sharing succeeded again. This supports an earlier interface-ownership conflict in that case. Only the server-side sharing stage was verified; there was no Windows client attach, disk access, or file transfer, so USB storage data transfer remains unverified.
 
 DDK mode reports USB speed only after a temporary, read-only USBManager pipe is opened with USB authorization; that pipe is closed immediately, and USB claiming and data transfers remain on DDK. If this speed query is unavailable, the device is not exported because the tested Windows client rejects an unknown speed.
 
@@ -52,7 +54,7 @@ DDK mode reports USB speed only after a temporary, read-only USBManager pipe is 
 
 Check [GitHub Releases](https://github.com/RockyMtnWolf/USBArc/releases) for unsigned HAP packages and release notes. A device generally requires an accepted signature before installation. Sign the package with credentials you are authorized to use. Do not share signing keys or provisioning profiles.
 
-The USBManager API itself does not require the DDK ACL. However, the current combined HAP declares `ACCESS_DDK_USB` and the driver extension unconditionally, and installation with an ordinary profile has not been verified—even if USBManager mode is selected. To use the optional DDK backend, the signing profile must include the approved `ohos.permission.ACCESS_DDK_USB` ACL. Without that ACL, remove the DDK permission and driver extension from the source before building a manager-only package; this manager-only configuration has not been tested.
+The USBManager API itself does not require the DDK ACL. However, the current combined HAP still requests `ACCESS_DDK_USB`, so installation with an ordinary profile has not been verified, even if USBManager mode is selected. To use the optional DDK backend, the signing profile must include the approved `ohos.permission.ACCESS_DDK_USB` ACL. A manager-only build would omit that permission; USBArc does not currently register a `DriverExtensionAbility`, and this manager-only configuration has not been tested.
 
 ## Build
 
@@ -97,17 +99,16 @@ The default port is `3240`. USBArc listens only after the user confirms the sele
 
 ## Permissions
 
-USB device authorization, DDK access, background tasks, and network listening are separate controls. The app requests these five manifest permissions:
+USB device authorization, DDK access, background tasks, and network listening are separate controls. The current manifest requests four permissions:
 
 | Permission | Protection | Purpose |
 | --- | --- | --- |
 | `ohos.permission.INTERNET` | Normal, system-grant | USB/IP networking. Does not grant firewall or inbound-network approval. |
 | `ohos.permission.GET_NETWORK_INFO` | Normal, system-grant | Read active network and local address information. |
 | `ohos.permission.KEEP_BACKGROUND_RUNNING` | Normal, system-grant | Request supported background tasks; the system can decline or cancel them. |
-| `ohos.permission.ACCESS_EXTENSIONAL_DEVICE_DRIVER` | Normal, system-grant | DeviceManager external-device query and driver binding APIs. |
-| `ohos.permission.ACCESS_DDK_USB` | System-basic, system-grant, restricted ACL | USB DDK access for the driver extension; requires an approved signing-profile ACL. |
+| `ohos.permission.ACCESS_DDK_USB` | System-basic, system-grant, restricted ACL | USB DDK access; requires an approved signing-profile ACL. |
 
-These classifications are from the API 26 SDK. USBManager device authorization is a separate per-device system request, not a manifest permission. The combined HAP unconditionally declares the two DDK-related permissions; ordinary-profile installation has not been verified even in USBManager mode. Without the DDK ACL, a manager-only source build must remove the DDK permission and driver extension; that configuration has not been tested. Background-task confirmation and TCP inbound/firewall policy are also separate from manifest permissions. See [Privacy Policy](https://privacy.rockymtnwolf.ccwu.cc/usbarc/) or contact [smartwolf@stu.xidian.edu.cn](mailto:smartwolf@stu.xidian.edu.cn).
+These classifications are from the API 26 SDK. The manifest no longer requests `ACCESS_EXTENSIONAL_DEVICE_DRIVER`. The experimental DDK backend calls NDK APIs directly from an ArkTS Worker rather than registering a `DriverExtensionAbility`; the official DriverExtension guide describes a separate workflow and does not establish support for this Worker architecture or compatibility across devices. The DDK path still requires its approved `ACCESS_DDK_USB` ACL and awaits real-device validation. USBManager authorization is a separate per-device system request, not a manifest permission. A manager-only build would omit `ACCESS_DDK_USB`; that configuration has not been tested. Background-task confirmation and TCP inbound/firewall policy are also separate from manifest permissions. See [Privacy Policy](https://privacy.rockymtnwolf.ccwu.cc/usbarc/) or contact [smartwolf@stu.xidian.edu.cn](mailto:smartwolf@stu.xidian.edu.cn).
 
 ## License
 
@@ -116,7 +117,7 @@ USBArc is released under the [BSD 3-Clause License](LICENSE). See [THIRD_PARTY_N
 ## References
 
 - [HarmonyOS USB service overview](https://developer.huawei.com/consumer/en/doc/harmonyos-guides-V14/usb-overview-V14)
-- [Peripheral Driver Development and signing](https://developer.huawei.com/consumer/en/doc/harmonyos-guides-V13/driverextensionability-V13)
+- [Peripheral Driver Development and signing (DriverExtensionAbility workflow; separate from USBArc's Worker path)](https://developer.huawei.com/consumer/en/doc/harmonyos-guides-V13/driverextensionability-V13)
 - [USB DDK guidelines (OpenHarmony)](https://github.com/openharmony/docs/blob/master/en/application-dev/device/driver/usb-ddk-guidelines.md)
 - [Requesting a debug profile and ACL permissions](https://developer.huawei.com/consumer/cn/doc/doccenter-getting-started/agc-help-debug-profile-0000002248181278)
 - [usbip-win2](https://github.com/vadimgrn/usbip-win2)

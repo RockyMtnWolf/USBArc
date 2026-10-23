@@ -1,40 +1,22 @@
-import { BusinessError, usbManager } from '@kit.BasicServicesKit';
-import { deviceManager } from '@kit.DriverDevelopmentKit';
-import { rpc } from '@kit.IPCKit';
+import { usbManager } from '@kit.BasicServicesKit';
+import { ErrorEvent, MessageEvents, worker } from '@kit.ArkTS';
 import {
   shouldHideDdkHubRow,
   shouldHideDdkSystemDescription,
   UsbHubDeviceDescriptor,
   usbManagerHubDescriptor
 } from '../usb/UsbHubClassification';
-import {
-  cleanupDdkAshmem,
-  MAX_DDK_SHARED_TRANSFER_BYTES,
-  validateDdkSharedTransferResult
-} from './DdkDriverRpcContract';
+import { UsbPhysicalAddress } from '../usb/UsbDeviceMetadata';
+import { MAX_DDK_SHARED_TRANSFER_BYTES } from './DdkDriverRpcContract';
+import { DdkRpcReply, DdkRpcRequest } from './DdkWorkerContract';
+export { DdkRpcReply, DdkRpcRequest } from './DdkWorkerContract';
 
-const DDK_RPC_CODE: number = 0x5542;
-const MAX_RPC_JSON_CHARS: number = 38000;
 export const MAX_DDK_RPC_TRANSFER_BYTES: number = MAX_DDK_SHARED_TRANSFER_BYTES;
 export const MAX_DDK_CONTROL_TRANSFER_BYTES: number = 1024;
-const RPC_WAIT_SECONDS: number = 35;
 
 export interface DdkTransferExpectation {
   isInput: boolean;
   maxLength: number;
-}
-
-function bytesToArrayBuffer(bytes: Array<number>): ArrayBuffer {
-  const result: Uint8Array = new Uint8Array(bytes.length);
-  for (let index: number = 0; index < bytes.length; index++) result[index] = bytes[index];
-  return result.buffer;
-}
-
-function arrayBufferToBytes(buffer: ArrayBuffer): Array<number> {
-  const view: Uint8Array = new Uint8Array(buffer);
-  const result: Array<number> = [];
-  for (let index: number = 0; index < view.length; index++) result.push(view[index]);
-  return result;
 }
 
 export interface DdkSystemDeviceInfo {
@@ -76,29 +58,13 @@ export interface DdkTransferResult {
   data: Array<number>;
 }
 
-interface DdkRpcRequest {
-  operation: string;
-  deviceId: string;
-  interfaceNumber: number;
-  handle: string;
-  alternateSetting: number;
-  configurationIndex: number;
-  endpointAddress: number;
-  timeoutMs: number;
-  setup: Array<number>;
-  data: Array<number>;
-  sharedMemoryTransfer: boolean;
-  sharedMemoryLength: number;
+export interface DdkWorkerRequestTransport {
+  request(request: DdkRpcRequest): Promise<DdkRpcReply>;
 }
 
-interface DdkRpcReply {
-  status: number;
-  error?: string;
-  initialized?: boolean;
-  resourcesReleased?: boolean;
-  value?: Object;
-  actualLength?: number;
-  data?: Array<number>;
+interface DdkPendingReply {
+  resolve: (reply: DdkRpcReply) => void;
+  reject: (error: Object) => void;
 }
 
 export type DdkDriverHealth = 'healthy' | 'released' | 'unavailable';
@@ -113,8 +79,6 @@ export function classifyDdkDriverHealth(status: number, initialized: boolean | u
 
 interface DdkBinding {
   systemDevice: DdkSystemDeviceInfo;
-  driver: deviceManager.RemoteDeviceDriver;
-  deathRecipient: rpc.DeathRecipient;
   claimTokens: Set<string>;
 }
 
@@ -196,19 +160,41 @@ export function isValidDdkTransferResult(expectation: DdkTransferExpectation, ac
   return expectation.isInput ? responseData.length === actualLength : responseData.length === 0;
 }
 
-function toSystemDeviceInfo(device: Readonly<deviceManager.Device>): DdkSystemDeviceInfo | undefined {
-  if (device.busType !== deviceManager.BusType.USB) return undefined;
-  const usbDevice: deviceManager.USBDevice = device as deviceManager.USBDevice;
+export function makeDdkPhysicalDeviceId(busNum: number, devAddress: number): number | undefined {
+  if (!Number.isInteger(busNum) || busNum < 0 || busNum > 0x1fffff ||
+    !Number.isInteger(devAddress) || devAddress < 1 || devAddress > 127) return undefined;
+  const id: number = busNum * 4294967296 + devAddress;
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
+/** Decimal spelling retained for diagnostics/tests that previously built the uint64 ID. */
+export function makeDdkProbeDeviceId(busNum: number, devAddress: number): string | undefined {
+  const deviceId: number | undefined = makeDdkPhysicalDeviceId(busNum, devAddress);
+  return deviceId === undefined ? undefined : deviceId.toString(10);
+}
+
+export function getDdkPhysicalBusAddress(deviceId: number): UsbPhysicalAddress | undefined {
+  if (!Number.isSafeInteger(deviceId) || deviceId < 0) return undefined;
+  const busNum: number = Math.floor(deviceId / 4294967296);
+  const devAddress: number = deviceId - busNum * 4294967296;
+  if (busNum > 0x1fffff || devAddress < 1 || devAddress > 127) return undefined;
+  return { busNum, devAddress };
+}
+
+function toSystemDeviceInfo(device: Readonly<usbManager.USBDevice>): DdkSystemDeviceInfo | undefined {
+  const deviceId: number | undefined = makeDdkPhysicalDeviceId(device.busNum, device.devAddress);
+  if (deviceId === undefined) return undefined;
   return {
-    deviceId: usbDevice.deviceId,
-    vendorId: usbDevice.vendorId,
-    productId: usbDevice.productId,
-    description: usbDevice.description
+    deviceId,
+    vendorId: device.vendorId,
+    productId: device.productId,
+    description: device.name
   };
 }
 
 function makeRequest(operation: string): DdkRpcRequest {
   return {
+    requestId: 0,
     operation,
     deviceId: '',
     interfaceNumber: 0,
@@ -224,22 +210,82 @@ function makeRequest(operation: string): DdkRpcRequest {
   };
 }
 
+/** One persistent worker owns NDK init/release and serializes all USB I/O. */
+class DdkWorkerTransport implements DdkWorkerRequestTransport {
+  private thread: worker.ThreadWorker | undefined = undefined;
+  private pending: Map<number, DdkPendingReply> = new Map<number, DdkPendingReply>();
+  private failed: boolean = false;
+
+  async request(request: DdkRpcRequest): Promise<DdkRpcReply> {
+    if (this.failed) throw new DdkDriverClientError('DDK worker stopped; native claims are retained', -16, -16);
+    this.ensureThread();
+    return await new Promise<DdkRpcReply>((resolve: (reply: DdkRpcReply) => void,
+      reject: (error: Object) => void): void => {
+      const pendingReply: DdkPendingReply = { resolve, reject };
+      this.pending.set(request.requestId, pendingReply);
+      try {
+        this.thread?.postMessage(request as Object);
+      } catch (error) {
+        this.pending.delete(request.requestId);
+        reject(error as Object);
+      }
+    });
+  }
+
+  private ensureThread(): void {
+    if (this.thread !== undefined) return;
+    try {
+      const instance: worker.ThreadWorker = new worker.ThreadWorker('entry/ets/workers/DdkDriverWorker.ets', {
+        name: 'USBArc-DDK-owner'
+      });
+      instance.onmessage = (event: MessageEvents): void => {
+        const reply: DdkRpcReply = event.data as DdkRpcReply;
+        const pending: DdkPendingReply | undefined = this.pending.get(reply.requestId);
+        if (pending === undefined) return;
+        this.pending.delete(reply.requestId);
+        pending.resolve(reply);
+      };
+      instance.onerror = (_event: ErrorEvent): void => { this.fail(); };
+      instance.onexit = (_code: number): void => { this.fail(); };
+      this.thread = instance;
+    } catch (error) {
+      this.failed = true;
+      throw new DdkDriverClientError(`Unable to start DDK worker: ${String(error)}`, -5, -5);
+    }
+  }
+
+  private fail(): void {
+    this.failed = true;
+    this.pending.forEach((pending: DdkPendingReply): void => {
+      pending.reject(new DdkDriverClientError('DDK worker exited; native claims are retained', -16, -16));
+    });
+    this.pending.clear();
+  }
+}
+
 export class DdkDriverClient {
   private bindings: Map<number, DdkBinding> = new Map<number, DdkBinding>();
   private disconnectListeners: Set<(systemDeviceId: number) => void> = new Set<(systemDeviceId: number) => void>();
+  private workerTransport: DdkWorkerRequestTransport;
+  private readonly systemDeviceProvider: (() => Array<DdkSystemDeviceInfo>) | undefined;
+  private nextRequestId: number = 1;
+  private initialized: boolean = false;
+  private transportFailed: boolean = false;
+
+  constructor(workerTransport?: DdkWorkerRequestTransport,
+    systemDeviceProvider?: () => Array<DdkSystemDeviceInfo>) {
+    this.workerTransport = workerTransport ?? new DdkWorkerTransport();
+    this.systemDeviceProvider = systemDeviceProvider;
+  }
 
   listSystemDevices(): Array<DdkSystemDeviceInfo> {
+    if (this.systemDeviceProvider !== undefined) return this.systemDeviceProvider();
     try {
       const result: Array<DdkSystemDeviceInfo> = [];
-      let managerDevices: Array<Readonly<usbManager.USBDevice>> = [];
-      try {
-        managerDevices = usbManager.getDevices();
-      } catch (_error) {
-        // Missing USBManager metadata is not evidence that a DDK row is a hub.
-      }
+      const managerDevices: Array<Readonly<usbManager.USBDevice>> = usbManager.getDevices();
       const managerDescriptors: Array<UsbHubDeviceDescriptor> = managerDevices.map(
         (item: Readonly<usbManager.USBDevice>): UsbHubDeviceDescriptor => usbManagerHubDescriptor(item));
-      deviceManager.queryDevices(deviceManager.BusType.USB).forEach((device: Readonly<deviceManager.Device>): void => {
+      managerDevices.forEach((device: Readonly<usbManager.USBDevice>): void => {
         const mapped: DdkSystemDeviceInfo | undefined = toSystemDeviceInfo(device);
         if (mapped === undefined) return;
         if (shouldHideDdkHubRow(mapped.vendorId, mapped.productId, managerDescriptors) ||
@@ -258,67 +304,47 @@ export class DdkDriverClient {
   }
 
   async checkHealth(systemDeviceId: number): Promise<DdkDriverHealth> {
-    const response: DdkRpcReply = await this.call(systemDeviceId, makeRequest('health'));
-    return classifyDdkDriverHealth(response.status, response.initialized, response.resourcesReleased);
+    if (this.transportFailed) return 'unavailable';
+    if (!this.initialized) return 'released';
+    try {
+      const response: DdkRpcReply = await this.workerTransport.request(this.makeWorkerRequest('health'));
+      return response.status === 0 && response.initialized === true ? 'healthy' : 'unavailable';
+    } catch (_error) {
+      this.transportFailed = true;
+      return 'unavailable';
+    }
   }
 
   async cleanupReleasedBinding(systemDeviceId: number): Promise<DdkReleasedCleanup> {
-    const health: DdkDriverHealth = await this.checkHealth(systemDeviceId);
-    if (health !== 'released') return 'not-released';
     const binding: DdkBinding | undefined = this.bindings.get(systemDeviceId);
-    if (binding === undefined) return 'released-unbound';
-    // `resourcesReleased` is reported only after the extension confirms release of every native claim.
-    binding.claimTokens.clear();
-    try {
-      await deviceManager.unbindDevice(systemDeviceId);
-    } catch (error) {
-      console.warn(`DDK resources were released, but DeviceManager unbind failed: ${this.fromPlatformError(
-        'unbind released DDK driver', error as Object).message}`);
-      return 'released-still-bound';
-    }
-    this.bindings.delete(systemDeviceId);
-    try { binding.driver.remote.unregisterDeathRecipient(binding.deathRecipient, 0); } catch (_error) { }
+    if (binding !== undefined && binding.claimTokens.size > 0) return 'not-released';
+    if (binding !== undefined) this.bindings.delete(systemDeviceId);
     return 'released-unbound';
   }
 
   async bind(systemDeviceId: number): Promise<void> {
-    if (this.bindings.has(systemDeviceId)) {
-      const health: DdkDriverHealth = await this.checkHealth(systemDeviceId);
-      if (health === 'healthy') return;
-      if (health === 'released') await this.cleanupReleasedBinding(systemDeviceId);
-      throw new DdkDriverClientError('Existing DDK binding is not healthy; retry after cleanup', -16, -16);
-    }
     const systemDevice: DdkSystemDeviceInfo | undefined = this.listSystemDevices().find(
       (device: DdkSystemDeviceInfo): boolean => device.deviceId === systemDeviceId);
     if (systemDevice === undefined) {
-      throw new DdkDriverClientError('USB device is no longer present in DeviceManager', 26300003, -19);
+      throw new DdkDriverClientError('USB device is no longer present in USBManager', 26300003, -19);
     }
 
-    const deathRecipient: rpc.DeathRecipient = {
-      onRemoteDied: (): void => { this.dropBinding(systemDeviceId); }
-    };
-    const onDisconnect = (_error: BusinessError | null, disconnectedId: number): void => {
-      if (disconnectedId === systemDeviceId) this.dropBinding(systemDeviceId);
-    };
     try {
-      // Intentionally use the API 11 compatibility binder: the API 19 replacement requires
-      // ACCESS_DDK_DRIVERS, which is outside this app's approved ACL profile.
-      const driver: deviceManager.RemoteDeviceDriver = await deviceManager.bindDeviceDriver(systemDeviceId, onDisconnect);
-      const binding: DdkBinding = {
-        systemDevice,
-        driver,
-        deathRecipient,
-        claimTokens: new Set<string>()
-      };
-      this.bindings.set(systemDeviceId, binding);
-      driver.remote.registerDeathRecipient(deathRecipient, 0);
-      const health: DdkRpcReply = await this.call(systemDeviceId, makeRequest('health'));
-      if (classifyDdkDriverHealth(health.status, health.initialized, health.resourcesReleased) !== 'healthy') {
-        await this.unbind(systemDeviceId);
-        throw new DdkDriverClientError('DDK driver service is not initialized', health.status, mapDdkUsbErrno(health.status));
+      await this.ensureInitialized();
+      const response: DdkRpcReply = await this.workerTransport.request(this.makeWorkerRequest(
+        'getDeviceDescriptor', systemDeviceId.toString()));
+      if (response.status !== 0) throw this.makeError('read DDK descriptor', response.status,
+        response.error ?? 'descriptor request failed');
+      if (response.value === undefined) throw new DdkDriverClientError('DDK device descriptor is unavailable', response.status, mapDdkUsbErrno(response.status));
+      const descriptor: DdkDeviceDescriptor = response.value as DdkDeviceDescriptor;
+      if (descriptor.id !== systemDeviceId.toString() || descriptor.vendorId !== systemDevice.vendorId ||
+        descriptor.productId !== systemDevice.productId) {
+        throw new DdkDriverClientError('DDK device identity does not match the selected USB device', -19, -19);
       }
+      if (!this.bindings.has(systemDeviceId)) this.bindings.set(systemDeviceId,
+        { systemDevice, claimTokens: new Set<string>() });
     } catch (error) {
-      throw this.fromPlatformError('bind DDK driver', error as Object);
+      throw this.fromError('initialize DDK worker', error);
     }
   }
 
@@ -332,15 +358,8 @@ export class DdkDriverClient {
       await this.call(systemDeviceId, request);
       binding.claimTokens.delete(tokens[index]);
     }
-    try {
-      // Pair with bindDeviceDriver; both compatibility APIs use ACCESS_EXTENSIONAL_DEVICE_DRIVER.
-      await deviceManager.unbindDevice(systemDeviceId);
-    } catch (error) {
-      throw this.fromPlatformError('unbind DDK driver', error as Object);
-    }
     binding.claimTokens.clear();
     this.bindings.delete(systemDeviceId);
-    try { binding.driver.remote.unregisterDeathRecipient(binding.deathRecipient, 0); } catch (_error) { }
   }
 
   async unbindAll(): Promise<void> {
@@ -348,16 +367,20 @@ export class DdkDriverClient {
     for (let index: number = 0; index < ids.length; index++) {
       await this.unbind(ids[index]);
     }
+    if (this.initialized) {
+      const result: DdkRpcReply = await this.workerTransport.request(this.makeWorkerRequest('release'));
+      if (result.status !== 0) throw this.makeError('release DDK', result.status, result.error ?? 'native release failed');
+      this.initialized = false;
+    }
   }
 
   async getDriverDeviceIds(systemDeviceId: number): Promise<Array<string>> {
-    const response: DdkRpcReply = await this.call(systemDeviceId, makeRequest('getDevices'));
-    if (!Array.isArray(response.value)) return [];
-    const ids: Array<string> = [];
-    (response.value as Array<Object>).forEach((value: Object): void => {
-      if (typeof value === 'string') ids.push(value as string);
-    });
-    return ids;
+    const binding: DdkBinding = this.requireBinding(systemDeviceId);
+    const descriptor: DdkDeviceDescriptor = await this.getDeviceDescriptor(systemDeviceId,
+      systemDeviceId.toString());
+    if (descriptor.vendorId !== binding.systemDevice.vendorId ||
+      descriptor.productId !== binding.systemDevice.productId || descriptor.id !== systemDeviceId.toString()) return [];
+    return [descriptor.id];
   }
 
   async getDeviceDescriptor(systemDeviceId: number, ddkDeviceId: string): Promise<DdkDeviceDescriptor> {
@@ -433,93 +456,40 @@ export class DdkDriverClient {
     const request: DdkRpcRequest = makeRequest('pipeTransfer');
     request.handle = handle;
     request.endpointAddress = endpointAddress;
-    request.sharedMemoryTransfer = true;
-    request.sharedMemoryLength = data.length;
+    request.sharedMemoryTransfer = false;
+    request.sharedMemoryLength = 0;
     request.timeoutMs = normalizeDdkTimeout(timeoutMs);
-    const ashmemSize: number = Math.max(1, data.length);
-    let ashmem: rpc.Ashmem;
-    try {
-      ashmem = rpc.Ashmem.create('USBArc-DdkPipeTransfer', ashmemSize);
-    } catch (error) {
-      const detail: string = error instanceof Error ? error.message : 'unsupported RPC Ashmem API';
-      throw new DdkDriverClientError(`DDK pipe transport requires rpc.Ashmem: ${detail}`, -95, -95);
-    }
-    let mapped: boolean = false;
-    try {
-      ashmem.mapReadWriteAshmem();
-      mapped = true;
-      if ((endpointAddress & 0x80) === 0 && data.length > 0) {
-        ashmem.writeDataToAshmem(bytesToArrayBuffer(data), data.length, 0);
-      }
-      return await this.transferCall(systemDeviceId, request, ashmem, data.length);
-    } finally {
-      try {
-        cleanupDdkAshmem((): void => ashmem.unmapAshmem(), (): void => ashmem.closeAshmem(), mapped);
-      } catch (error) {
-        const detail: string = error instanceof Error ? error.message : 'unknown Ashmem cleanup error';
-        throw new DdkDriverClientError(`DDK pipe Ashmem cleanup failed: ${detail}`, -5, -5);
-      }
-    }
+    request.data = data.slice();
+    return await this.transferCall(systemDeviceId, request);
   }
 
-  private async transferCall(systemDeviceId: number, request: DdkRpcRequest,
-    sharedMemory?: rpc.Ashmem, sharedCapacity?: number): Promise<DdkTransferResult> {
-    const response: DdkRpcReply = await this.call(systemDeviceId, request, sharedMemory);
+  private async transferCall(systemDeviceId: number, request: DdkRpcRequest): Promise<DdkTransferResult> {
+    const response: DdkRpcReply = await this.call(systemDeviceId, request);
     const actualLength: number = response.actualLength ?? 0;
     let data: Array<number> = response.data ?? [];
     const isInput: boolean = request.operation === 'pipeTransfer' ?
       (request.endpointAddress & 0x80) !== 0 : getDdkTransferExpectation(request.operation,
         request.endpointAddress, request.setup, request.data).isInput;
-    const maxLength: number = sharedMemory === undefined ? getDdkTransferExpectation(request.operation,
-      request.endpointAddress, request.setup, request.data).maxLength : (sharedCapacity ?? 0);
-    if (sharedMemory !== undefined && isInput && response.status === 0 && actualLength > 0) {
-      data = arrayBufferToBytes(sharedMemory.readDataFromAshmem(actualLength, 0));
-    }
-    const valid: boolean = sharedMemory === undefined ?
-      isValidDdkTransferResult({ isInput, maxLength }, actualLength, data) :
-      validateDdkSharedTransferResult(isInput, maxLength, actualLength, data);
+    const maxLength: number = getDdkTransferExpectation(request.operation,
+      request.endpointAddress, request.setup, request.data).maxLength;
+    const valid: boolean = isValidDdkTransferResult({ isInput, maxLength }, actualLength, data);
     if (!valid) {
       throw new DdkDriverClientError('DDK RPC transfer response has invalid length', -5, -5);
     }
     return { status: response.status, actualLength, data: data.slice() };
   }
 
-  private async call(systemDeviceId: number, request: DdkRpcRequest,
-    sharedMemory?: rpc.Ashmem): Promise<DdkRpcReply> {
-    const binding: DdkBinding = this.requireBinding(systemDeviceId);
-    const serialized: string = JSON.stringify(request);
-    if (serialized.length > MAX_RPC_JSON_CHARS) {
-      throw new DdkDriverClientError('DDK RPC request exceeds message size limit', -90, -90);
+  private async call(systemDeviceId: number, request: DdkRpcRequest): Promise<DdkRpcReply> {
+    this.requireBinding(systemDeviceId);
+    const response: DdkRpcReply = await this.workerTransport.request(this.makeWorkerRequest(request.operation,
+      request.deviceId || systemDeviceId.toString(), request.interfaceNumber, request.handle,
+      request.alternateSetting, request.configurationIndex, request.endpointAddress, request.timeoutMs,
+      request.setup, request.data));
+    if (!Number.isInteger(response.status)) throw new DdkDriverClientError('DDK worker returned malformed status', -5, -5);
+    if (response.status !== 0 && request.operation !== 'health') {
+      throw this.makeError(`DDK ${request.operation}`, response.status, response.error ?? 'native operation failed');
     }
-    const data: rpc.MessageSequence = rpc.MessageSequence.create();
-    const reply: rpc.MessageSequence = rpc.MessageSequence.create();
-    try {
-      data.writeString(serialized);
-      if (sharedMemory !== undefined) data.writeAshmem(sharedMemory);
-      const result: rpc.RequestResult = await binding.driver.remote.sendMessageRequest(
-        DDK_RPC_CODE, data, reply, new rpc.MessageOption(rpc.MessageOption.TF_SYNC, RPC_WAIT_SECONDS));
-      if (result.errCode !== 0) {
-        throw new DdkDriverClientError(`DDK RPC transport failed (${result.errCode})`, result.errCode, -5);
-      }
-      const responseText: string = result.reply.readString();
-      if (responseText.length > MAX_RPC_JSON_CHARS) {
-        throw new DdkDriverClientError('DDK RPC response exceeds message size limit', -90, -90);
-      }
-      const response: DdkRpcReply = JSON.parse(responseText) as DdkRpcReply;
-      if (!Number.isInteger(response.status)) {
-        throw new DdkDriverClientError('DDK RPC returned a malformed status', -5, -5);
-      }
-      if (response.status !== 0 && request.operation !== 'health') {
-        const message: string = response.error ?? `DDK operation failed (${response.status})`;
-        throw new DdkDriverClientError(message, response.status, mapDdkUsbErrno(response.status));
-      }
-      return response;
-    } catch (error) {
-      throw this.fromPlatformError(`DDK ${request.operation}`, error as Object);
-    } finally {
-      try { data.reclaim(); } catch (_error) { }
-      try { reply.reclaim(); } catch (_error) { }
-    }
+    return response;
   }
 
   private requireBinding(systemDeviceId: number): DdkBinding {
@@ -530,21 +500,35 @@ export class DdkDriverClient {
     return binding;
   }
 
-  private dropBinding(systemDeviceId: number): void {
-    const binding: DdkBinding | undefined = this.bindings.get(systemDeviceId);
-    if (binding === undefined) return;
-    this.bindings.delete(systemDeviceId);
-    try { binding.driver.remote.unregisterDeathRecipient(binding.deathRecipient, 0); } catch (_error) { }
-    binding.claimTokens.clear();
-    this.disconnectListeners.forEach((listener: (deviceId: number) => void): void => listener(systemDeviceId));
+  private async ensureInitialized(): Promise<void> {
+    if (this.transportFailed) throw new DdkDriverClientError('DDK worker is unavailable; claims are retained', -16, -16);
+    if (this.initialized) return;
+    const reply: DdkRpcReply = await this.workerTransport.request(this.makeWorkerRequest('init'));
+    if (reply.status !== 0) throw this.makeError('initialize DDK', reply.status, reply.error ?? 'native init failed');
+    this.initialized = true;
+  }
+
+  private makeWorkerRequest(operation: string, deviceId: string = '', interfaceNumber: number = 0,
+    handle: string = '', alternateSetting: number = 0, configurationIndex: number = 0,
+    endpointAddress: number = 0, timeoutMs: number = 0, setup: Array<number> = [], data: Array<number> = []): DdkRpcRequest {
+    const requestId: number = this.nextRequestId++;
+    return { requestId, operation, deviceId, interfaceNumber, handle, alternateSetting,
+      configurationIndex, endpointAddress, timeoutMs, setup: setup.slice(), data: data.slice(),
+      sharedMemoryTransfer: false, sharedMemoryLength: 0 };
+  }
+
+  private makeError(operation: string, status: number, detail: string): DdkDriverClientError {
+    return new DdkDriverClientError(formatDdkPlatformErrorMessage(operation, status, detail), status,
+      mapDdkUsbErrno(status));
+  }
+
+  private fromError(operation: string, error: Object): DdkDriverClientError {
+    if (error instanceof DdkDriverClientError) return error;
+    return new DdkDriverClientError(`${operation} failed: ${String(error)}`, -5, -5);
   }
 
   private fromPlatformError(operation: string, error: Object): DdkDriverClientError {
     if (error instanceof DdkDriverClientError) return error;
-    const businessError: BusinessError = error as BusinessError;
-    const status: number = businessError.code ?? -5;
-    const detail: string = businessError.message ?? String(error);
-    return new DdkDriverClientError(formatDdkPlatformErrorMessage(operation, status, detail), status,
-      mapDdkUsbErrno(status));
+    return this.fromError(operation, error);
   }
 }

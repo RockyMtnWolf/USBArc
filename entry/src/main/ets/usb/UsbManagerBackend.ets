@@ -13,6 +13,7 @@ import {
   makeDeviceId
 } from './UsbModels';
 import { isProvableUsbHub, usbManagerHubDescriptor } from './UsbHubClassification';
+import { describeUsbManagerClaimFailure } from './UsbManagerClaimFailure';
 
 const USB_LOG_DOMAIN: number = 0x0000;
 const USB_LOG_TAG: string = 'UsbManagerBackend';
@@ -299,16 +300,39 @@ export class UsbManagerBackend {
     if (device === undefined) {
       throw new UsbBackendError('USB device disconnected', -19);
     }
-    if (!usbManager.hasRight(device.name)) {
+    const hasRight: boolean = usbManager.hasRight(device.name);
+    hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+      'USB manager open begin bus=%{public}d address=%{public}d vid=%{public}d pid=%{public}d configs=%{public}d right=%{public}d forceClaim=%{public}d retained=%{public}d',
+      device.busNum, device.devAddress, device.vendorId, device.productId, device.configs.length,
+      hasRight ? 1 : 0, forceClaim ? 1 : 0, this.handles.has(deviceId) ? 1 : 0);
+    if (!hasRight) {
       this.closeDevice(deviceId);
+      hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager open blocked: no right bus=%{public}d address=%{public}d', device.busNum, device.devAddress);
       throw new UsbBackendError('USB access permission is required', -13);
     }
     const retainedHandle: UsbManagerDeviceHandle | undefined = this.handles.get(deviceId);
     if (retainedHandle !== undefined) {
+      hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager reusing retained pipe bus=%{public}d address=%{public}d config=%{public}d claimedInterfaces=%{public}d',
+        device.busNum, device.devAddress, retainedHandle.activeConfigurationId, retainedHandle.claimedInterfaces.length);
       return retainedHandle;
     }
-    const pipe: usbManager.USBDevicePipe = usbManager.connectDevice(device);
+    let pipe: usbManager.USBDevicePipe;
+    try {
+      pipe = usbManager.connectDevice(device);
+    } catch (error) {
+      const code: number = businessErrorCode(error as Object);
+      hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager connectDevice threw bus=%{public}d address=%{public}d sdkCode=%{public}d',
+        device.busNum, device.devAddress, code);
+      if (error instanceof Error) throw error;
+      throw new UsbBackendError(`USB manager connectDevice failed (SDK code ${code})`, -5);
+    }
     if (pipe === undefined) {
+      hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager connectDevice returned undefined bus=%{public}d address=%{public}d',
+        device.busNum, device.devAddress);
       throw new UsbBackendError('Could not open USB device pipe', -5);
     }
     const handle: UsbManagerDeviceHandle = {
@@ -319,9 +343,13 @@ export class UsbManagerBackend {
     handle.info.serialNumber = this.serialCache.get(deviceId) ?? handle.info.serialNumber;
     handle.info.speed = this.queryPipeSpeed(pipe);
     const currentConfig: UsbConfigurationInfo | undefined = handle.info.configurations[0];
+    hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+      'USB manager pipe ready bus=%{public}d address=%{public}d selectedConfig=%{public}d configSource=%{public}s interfaceDescriptors=%{public}d speed=%{public}d',
+      device.busNum, device.devAddress, handle.activeConfigurationId, 'first-advertised',
+      currentConfig === undefined ? 0 : currentConfig.interfaces.length, handle.info.speed);
     if (currentConfig !== undefined) {
       try {
-        // Claim without force: the app never silently steals an interface from another local driver.
+        // Honor only the user's explicit force-claim choice; never enable it automatically.
         for (let index: number = 0; index < currentConfig.interfaces.length; index++) {
           const targetInfo: UsbInterfaceInfo = currentConfig.interfaces[index];
           if (targetInfo.alternateSetting !== 0 || handle.activeAlternates.has(targetInfo.id)) continue;
@@ -329,12 +357,23 @@ export class UsbManagerBackend {
             (item: usbManager.USBInterface): boolean => item.id === targetInfo.id && item.alternateSetting === targetInfo.alternateSetting
           );
           if (rawInterface === undefined) {
+            hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+              'USB manager interface lookup failed bus=%{public}d address=%{public}d config=%{public}d interface=%{public}d alternate=%{public}d',
+              device.busNum, device.devAddress, currentConfig.id, targetInfo.id, targetInfo.alternateSetting);
             continue;
           }
+          hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+            'USB manager claim begin bus=%{public}d address=%{public}d config=%{public}d interface=%{public}d alternate=%{public}d forceClaim=%{public}d',
+            device.busNum, device.devAddress, currentConfig.id, rawInterface.id, rawInterface.alternateSetting,
+            forceClaim ? 1 : 0);
           const claimResult: number = usbManager.claimInterface(pipe, rawInterface, forceClaim);
+          hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+            'USB manager claim end bus=%{public}d address=%{public}d config=%{public}d interface=%{public}d alternate=%{public}d forceClaim=%{public}d sdkCode=%{public}d',
+            device.busNum, device.devAddress, currentConfig.id, rawInterface.id, rawInterface.alternateSetting,
+            forceClaim ? 1 : 0, claimResult);
           if (claimResult !== 0) {
             throw new UsbBackendError(
-              `USB interface ${targetInfo.id} claim failed (USB SDK code ${claimResult})`,
+              describeUsbManagerClaimFailure(targetInfo.id, claimResult, targetInfo.clazz, forceClaim),
               mapUsbManagerClaimError(claimResult));
           }
           handle.claimedRawInterfaces.push(rawInterface);
@@ -342,6 +381,10 @@ export class UsbManagerBackend {
           handle.activeAlternates.set(rawInterface.id, 0);
         }
       } catch (error) {
+        const code: number = error instanceof UsbBackendError ? error.status : -5;
+        hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'USB manager open rollback bus=%{public}d address=%{public}d config=%{public}d claimedInterfaces=%{public}d status=%{public}d',
+          device.busNum, device.devAddress, handle.activeConfigurationId, handle.claimedInterfaces.length, code);
         this.releaseHandle(handle);
         if (error instanceof UsbBackendError) throw error;
         if (error instanceof Error) throw new UsbBackendError(error.message, -5);
@@ -357,9 +400,15 @@ export class UsbManagerBackend {
   }
 
   closeDevice(deviceId: string): void {
-    if (this.closingIds.has(deviceId)) return;
+    if (this.closingIds.has(deviceId)) {
+      hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG, 'USB manager close skipped: transfer still draining');
+      return;
+    }
     const handle: UsbManagerDeviceHandle | undefined = this.handles.get(deviceId);
     if (handle !== undefined) {
+      hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager close begin bus=%{public}d address=%{public}d config=%{public}d claimedInterfaces=%{public}d',
+        handle.device.busNum, handle.device.devAddress, handle.activeConfigurationId, handle.claimedInterfaces.length);
       this.handles.delete(deviceId);
       this.releaseHandle(handle);
     }
@@ -378,13 +427,31 @@ export class UsbManagerBackend {
   private releaseHandle(handle: UsbManagerDeviceHandle): void {
     for (let index: number = handle.claimedRawInterfaces.length - 1; index >= 0; index--) {
       try {
-        usbManager.releaseInterface(handle.pipe, handle.claimedRawInterfaces[index]);
-      } catch (_error) {
+        const result: number = usbManager.releaseInterface(handle.pipe, handle.claimedRawInterfaces[index]);
+        if (result !== 0) {
+          hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+            'USB manager releaseInterface returned error bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+            handle.device.busNum, handle.device.devAddress, handle.claimedRawInterfaces[index].id, result);
+        }
+      } catch (error) {
+        const code: number = businessErrorCode(error as Object);
+        hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'USB manager releaseInterface threw bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+          handle.device.busNum, handle.device.devAddress, handle.claimedRawInterfaces[index].id, code);
       }
     }
     try {
-      usbManager.closePipe(handle.pipe);
-    } catch (_error) {
+      const result: number = usbManager.closePipe(handle.pipe);
+      if (result !== 0) {
+        hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'USB manager closePipe returned error bus=%{public}d address=%{public}d sdkCode=%{public}d',
+          handle.device.busNum, handle.device.devAddress, result);
+      }
+    } catch (error) {
+      const code: number = businessErrorCode(error as Object);
+      hilog.error(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager closePipe threw bus=%{public}d address=%{public}d sdkCode=%{public}d',
+        handle.device.busNum, handle.device.devAddress, code);
     }
   }
 
@@ -498,13 +565,32 @@ export class UsbManagerBackend {
     }
     const rawConfig: usbManager.USBConfiguration | undefined = config.raw;
     if (rawConfig === undefined) return -95;
+    hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+      'USB manager setConfiguration begin bus=%{public}d address=%{public}d oldConfig=%{public}d targetConfig=%{public}d interfaceDescriptors=%{public}d forceClaim=%{public}d',
+      handle.device.busNum, handle.device.devAddress, handle.activeConfigurationId, value,
+      rawConfig.interfaces.length, forceClaim ? 1 : 0);
     handle.claimedRawInterfaces.forEach((iface: usbManager.USBInterface) => {
-      try { usbManager.releaseInterface(handle.pipe, iface); } catch (_error) { }
+      try {
+        const releaseResult: number = usbManager.releaseInterface(handle.pipe, iface);
+        if (releaseResult !== 0) {
+          hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+            'USB manager config transition release returned error bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+            handle.device.busNum, handle.device.devAddress, iface.id, releaseResult);
+        }
+      } catch (error) {
+        const code: number = businessErrorCode(error as Object);
+        hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+          'USB manager config transition release threw bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+          handle.device.busNum, handle.device.devAddress, iface.id, code);
+      }
     });
     handle.claimedRawInterfaces = [];
     handle.claimedInterfaces = [];
     handle.activeAlternates.clear();
     const result: number = usbManager.setConfiguration(handle.pipe, rawConfig);
+    hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+      'USB manager setConfiguration end bus=%{public}d address=%{public}d targetConfig=%{public}d sdkCode=%{public}d',
+      handle.device.busNum, handle.device.devAddress, value, result);
     if (result !== 0) return this.mapUsbError(result);
     handle.activeConfigurationId = config.id;
     let claimFailed: boolean = false;
@@ -513,6 +599,10 @@ export class UsbManagerBackend {
     rawConfig.interfaces.forEach((iface: usbManager.USBInterface) => {
       if (claimFailed || iface.alternateSetting !== 0 || claimedIds.has(iface.id)) return;
       const claimResult: number = usbManager.claimInterface(handle.pipe, iface, forceClaim);
+      hilog.info(USB_LOG_DOMAIN, USB_LOG_TAG,
+        'USB manager config claim bus=%{public}d address=%{public}d config=%{public}d interface=%{public}d alternate=%{public}d forceClaim=%{public}d sdkCode=%{public}d',
+        handle.device.busNum, handle.device.devAddress, value, iface.id, iface.alternateSetting,
+        forceClaim ? 1 : 0, claimResult);
       if (claimResult !== 0) {
         claimFailed = true;
         claimFailureStatus = mapUsbManagerClaimError(claimResult);
@@ -525,7 +615,19 @@ export class UsbManagerBackend {
     });
     if (claimFailed) {
       handle.claimedRawInterfaces.forEach((iface: usbManager.USBInterface) => {
-        try { usbManager.releaseInterface(handle.pipe, iface); } catch (_error) { }
+        try {
+          const releaseResult: number = usbManager.releaseInterface(handle.pipe, iface);
+          if (releaseResult !== 0) {
+            hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+              'USB manager config rollback release returned error bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+              handle.device.busNum, handle.device.devAddress, iface.id, releaseResult);
+          }
+        } catch (error) {
+          const code: number = businessErrorCode(error as Object);
+          hilog.warn(USB_LOG_DOMAIN, USB_LOG_TAG,
+            'USB manager config rollback release threw bus=%{public}d address=%{public}d interface=%{public}d sdkCode=%{public}d',
+            handle.device.busNum, handle.device.devAddress, iface.id, code);
+        }
       });
       handle.claimedRawInterfaces = [];
       handle.claimedInterfaces = [];

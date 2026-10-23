@@ -151,7 +151,7 @@ export class UsbArcPreferences {
     return serialNumber.length > 0 && serialNumber === normalized.serialNumber;
   }
 
-  private static normalize(value: Object): UsbArcPreferencesData {
+  static normalize(value: Object): UsbArcPreferencesData {
     const source = value as Record<string, Object>;
     const rules: Array<UsbAutoShareRule> = [];
     const sourceRules: Object | undefined = source['rules'];
@@ -180,7 +180,7 @@ export class UsbArcPreferences {
       autoShareScope: scope === 'rules' ? 'rules' : 'all',
       maxClients: Number.isInteger(maxClients) && maxClients > 0 && maxClients <= 32 ?
         maxClients : DEFAULT_USB_ARC_PREFERENCES.maxClients,
-      forceClaim: source['forceClaim'] === true,
+      forceClaim: backendMode === 'usbManager' && source['forceClaim'] === true,
       retainClaimsOnStop: source['retainClaimsOnStop'] === true,
       backgroundTaskMode: source['backgroundTaskMode'] === 'download' ||
         source['backgroundTaskMode'] === 'taskKeeping' ? source['backgroundTaskMode'] as 'download' | 'taskKeeping' : 'off',

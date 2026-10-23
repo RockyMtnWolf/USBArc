@@ -1,5 +1,6 @@
 import { usbManager } from '@kit.BasicServicesKit';
 import usbipNative from 'libusbip_native.so';
+import { UsbPhysicalAddress } from '../usb/UsbDeviceMetadata';
 
 const PERMISSION_POLL_INTERVAL_MS: number = 200;
 const PERMISSION_POLL_LIMIT: number = 40;
@@ -15,12 +16,15 @@ export interface UsbNegotiatedSpeedDeviceIdentity {
 
 /** Returns the only VID/PID match, or -1 when absent or ambiguous. */
 export function selectUniqueUsbSpeedDeviceIndex(
-  devices: ReadonlyArray<UsbNegotiatedSpeedDeviceIdentity>, vendorId: number, productId: number
+  devices: ReadonlyArray<UsbNegotiatedSpeedDeviceIdentity>, vendorId: number, productId: number,
+  physicalIdentity?: UsbPhysicalAddress
 ): number {
   let matchIndex: number = -1;
   for (let index: number = 0; index < devices.length; index++) {
     const candidate: UsbNegotiatedSpeedDeviceIdentity = devices[index];
     if (candidate.vendorId !== vendorId || candidate.productId !== productId) continue;
+    if (physicalIdentity !== undefined && (candidate.busNum !== physicalIdentity.busNum ||
+      candidate.devAddress !== physicalIdentity.devAddress)) continue;
     if (matchIndex >= 0) return -1;
     matchIndex = index;
   }
@@ -48,7 +52,8 @@ function waitForPermissionPoll(): Promise<void> {
  * Returns USB/IP speed 1..6, or 0 when permission/device identity/speed is unknown.
  */
 export async function readUsbNegotiatedSpeed(
-  vendorId: number, productId: number, allowRequest: boolean
+  vendorId: number, productId: number, allowRequest: boolean,
+  physicalIdentity?: UsbPhysicalAddress
 ): Promise<number> {
   let initialDevices: Array<Readonly<usbManager.USBDevice>>;
   try {
@@ -56,7 +61,7 @@ export async function readUsbNegotiatedSpeed(
   } catch (_error) {
     return 0;
   }
-  const initialIndex: number = selectUniqueUsbSpeedDeviceIndex(initialDevices, vendorId, productId);
+  const initialIndex: number = selectUniqueUsbSpeedDeviceIndex(initialDevices, vendorId, productId, physicalIdentity);
   if (initialIndex < 0) return 0;
   const initialDevice: Readonly<usbManager.USBDevice> = initialDevices[initialIndex];
 
@@ -74,7 +79,8 @@ export async function readUsbNegotiatedSpeed(
     } catch (_error) {
       return 0;
     }
-    const beforePermissionIndex: number = selectUniqueUsbSpeedDeviceIndex(beforePermission, vendorId, productId);
+    const beforePermissionIndex: number = selectUniqueUsbSpeedDeviceIndex(beforePermission, vendorId, productId,
+      physicalIdentity);
     if (beforePermissionIndex < 0 ||
       !sameUsbSpeedDeviceIdentity(initialDevice, beforePermission[beforePermissionIndex])) return 0;
 
@@ -95,7 +101,8 @@ export async function readUsbNegotiatedSpeed(
       } catch (_error) {
         return 0;
       }
-      const currentIndex: number = selectUniqueUsbSpeedDeviceIndex(currentDevices, vendorId, productId);
+      const currentIndex: number = selectUniqueUsbSpeedDeviceIndex(currentDevices, vendorId, productId,
+        physicalIdentity);
       if (currentIndex < 0 || !sameUsbSpeedDeviceIdentity(initialDevice, currentDevices[currentIndex])) return 0;
       try {
         authorized = usbManager.hasRight(currentDevices[currentIndex].name);
@@ -114,7 +121,7 @@ export async function readUsbNegotiatedSpeed(
   } catch (_error) {
     return 0;
   }
-  const beforeIndex: number = selectUniqueUsbSpeedDeviceIndex(beforeRead, vendorId, productId);
+  const beforeIndex: number = selectUniqueUsbSpeedDeviceIndex(beforeRead, vendorId, productId, physicalIdentity);
   if (beforeIndex < 0 || !sameUsbSpeedDeviceIdentity(initialDevice, beforeRead[beforeIndex])) return 0;
   const device: Readonly<usbManager.USBDevice> = beforeRead[beforeIndex];
   try {
@@ -134,7 +141,7 @@ export async function readUsbNegotiatedSpeed(
 
     // Reject a disconnect/reconnect or replacement that happened during the native query.
     const afterRead: Array<Readonly<usbManager.USBDevice>> = usbManager.getDevices();
-    const afterIndex: number = selectUniqueUsbSpeedDeviceIndex(afterRead, vendorId, productId);
+    const afterIndex: number = selectUniqueUsbSpeedDeviceIndex(afterRead, vendorId, productId, physicalIdentity);
     if (afterIndex < 0 || !sameUsbSpeedDeviceIdentity(device, afterRead[afterIndex])) return 0;
     return speed;
   } catch (_error) {

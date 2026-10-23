@@ -8,6 +8,7 @@ import {
   DdkDriverClientError,
   DdkSystemDeviceInfo,
   DdkTransferResult,
+  getDdkPhysicalBusAddress,
   mapDdkUsbErrno
 } from '../services/DdkDriverClient';
 import {
@@ -22,7 +23,6 @@ import {
 } from './UsbModels';
 import { UsbBackendError } from './UsbManagerBackend';
 import { readUsbNegotiatedSpeed } from '../services/UsbNegotiatedSpeed';
-import { startDdkReadOnlyProbe } from '../services/DdkReadOnlyProbe';
 import {
   mergeUsbDisplayMetadata,
   selectUsbManagerMetadata,
@@ -70,6 +70,13 @@ export function makeDdkLogicalBusNumber(ddkDeviceId: string): number {
 
 export function selectUniqueDdkMatch(systemDevice: DdkSystemDeviceInfo,
   descriptors: Array<DdkDeviceDescriptor>): DdkDeviceDescriptor {
+  const physicalId: string = systemDevice.deviceId.toString();
+  const exact: Array<DdkDeviceDescriptor> = descriptors.filter((item: DdkDeviceDescriptor): boolean =>
+    item.id === physicalId);
+  if (exact.length === 1) {
+    if (exact[0].vendorId === systemDevice.vendorId && exact[0].productId === systemDevice.productId) return exact[0];
+    throw new DdkDriverClientError('DDK physical device ID does not match USBManager VID/PID', -19, -19);
+  }
   const matches: Array<DdkDeviceDescriptor> = descriptors.filter((item: DdkDeviceDescriptor): boolean =>
     item.vendorId === systemDevice.vendorId && item.productId === systemDevice.productId);
   if (matches.length !== 1) {
@@ -216,7 +223,8 @@ function readUsbManagerMetadata(): Array<UsbManagerDeviceMetadata> {
 function makeSystemRow(system: DdkSystemDeviceInfo, managerDevices: ReadonlyArray<UsbManagerDeviceMetadata>): UsbDeviceInfo {
   const id: string = `ddk-system-${system.deviceId}`;
   const managerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
-    system.vendorId, system.productId, system.description, managerDevices);
+    system.vendorId, system.productId, system.description, managerDevices,
+    getDdkPhysicalBusAddress(system.deviceId));
   const display: UsbDisplayMetadata = mergeUsbDisplayMetadata(managerMetadata, {
     manufacturer: '', product: '', serialNumber: ''
   });
@@ -273,7 +281,6 @@ export class UsbDdkBackend {
   private closingIds: Set<string> = new Set<string>();
   private unavailableIds: Set<string> = new Set<string>();
   private removedIds: Array<string> = [];
-  private readOnlyProbeAttemptedIds: Set<string> = new Set<string>();
 
   constructor(client: DdkDriverClient = new DdkDriverClient()) {
     this.client = client;
@@ -367,7 +374,8 @@ export class UsbDdkBackend {
     if (system === undefined) throw new DdkDriverClientError('Selected USB device is no longer present', -19, -19);
     // Read only the manager's descriptor snapshot before binding; do not request rights or open a pipe here.
     const managerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
-      system.vendorId, system.productId, system.description, readUsbManagerMetadata());
+      system.vendorId, system.productId, system.description, readUsbManagerMetadata(),
+      getDdkPhysicalBusAddress(system.deviceId));
     const publicId: string = `ddk-system-${systemDeviceId}`;
     const previouslySelected: UsbDeviceInfo | undefined = this.selected.get(publicId);
     if (previouslySelected !== undefined && previouslySelected.authorized &&
@@ -378,7 +386,8 @@ export class UsbDdkBackend {
           this.unavailableIds.delete(publicId);
           applyDisplayMetadata(previouslySelected, system, managerMetadata === undefined ? [] : [managerMetadata]);
           if (previouslySelected.speed === 0 && !this.handles.has(publicId)) {
-            previouslySelected.speed = await readUsbNegotiatedSpeed(system.vendorId, system.productId, true);
+            previouslySelected.speed = await readUsbNegotiatedSpeed(system.vendorId, system.productId, true,
+              getDdkPhysicalBusAddress(system.deviceId));
           }
           // Never rebind a live selection: it may have interfaces claimed by an active import.
           return this.copyInfo(previouslySelected);
@@ -395,11 +404,6 @@ export class UsbDdkBackend {
     try {
       await this.client.bind(systemDeviceId);
     } catch (error) {
-      try {
-        this.scheduleReadOnlyProbe(system);
-      } catch (_probeError) {
-        // Keep the original bind error authoritative.
-      }
       if (error instanceof Error) throw error;
       throw new DdkDriverClientError('DDK driver binding failed', -5, -5);
     }
@@ -437,7 +441,8 @@ export class UsbDdkBackend {
         devAddress: 1,
         vendorId: descriptor.vendorId,
         productId: descriptor.productId,
-        speed: await readUsbNegotiatedSpeed(descriptor.vendorId, descriptor.productId, true),
+        speed: await readUsbNegotiatedSpeed(descriptor.vendorId, descriptor.productId, true,
+          getDdkPhysicalBusAddress(system.deviceId)),
         manufacturer: display.manufacturer,
         product: display.product,
         serialNumber: display.serialNumber,
@@ -463,23 +468,6 @@ export class UsbDdkBackend {
       if (error instanceof DdkDriverClientError) throw error;
       throw new DdkDriverClientError('Could not resolve selected DDK device identity', -5, -5);
     }
-  }
-
-  private scheduleReadOnlyProbe(system: DdkSystemDeviceInfo): void {
-    const currentManagerMetadata: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
-      system.vendorId, system.productId, system.description, readUsbManagerMetadata());
-    // A fresh, exact USBManager row is required; never probe a stale DDK enumeration entry.
-    if (currentManagerMetadata === undefined) return;
-    const probeKey: string = `${currentManagerMetadata.busNum}-${currentManagerMetadata.devAddress}-` +
-      `${currentManagerMetadata.vendorId}-${currentManagerMetadata.productId}`;
-    if (this.readOnlyProbeAttemptedIds.has(probeKey)) return;
-    const started: boolean = startDdkReadOnlyProbe({
-      busNum: currentManagerMetadata.busNum,
-      devAddress: currentManagerMetadata.devAddress,
-      vendorId: currentManagerMetadata.vendorId,
-      productId: currentManagerMetadata.productId
-    });
-    if (started) this.readOnlyProbeAttemptedIds.add(probeKey);
   }
 
   private async readDeviceStrings(systemDeviceId: number, descriptor: DdkDeviceDescriptor): Promise<Array<string>> {
@@ -565,7 +553,8 @@ export class UsbDdkBackend {
     if (!this.sharedIds.has(deviceId)) throw new UsbBackendError('DDK device is not selected for sharing', -19);
     if (this.closingIds.has(deviceId)) throw new UsbBackendError('Previous DDK transfer is still draining', -16);
     if (this.unavailableIds.has(deviceId)) throw new UsbBackendError('DDK driver health is unavailable', -19);
-    if (forceClaim) throw new UsbBackendError('DDK does not expose force-claim semantics; disable force claim to continue', -95);
+    // DDK claim behavior is fixed by the platform service. The USBManager force option does not apply here.
+    void forceClaim;
     const retained: UsbDdkDeviceHandle | undefined = this.handles.get(deviceId);
     if (retained !== undefined) return retained;
     const info: UsbDeviceInfo | undefined = this.selected.get(deviceId);
@@ -573,7 +562,9 @@ export class UsbDdkBackend {
       throw new UsbBackendError('DDK device is not bound and initialized', -13);
     }
     if (info.speed === 0) {
-      info.speed = await readUsbNegotiatedSpeed(info.vendorId, info.productId, true);
+      const physicalIdentity = info.backendDeviceId === undefined ? undefined :
+        getDdkPhysicalBusAddress(info.backendDeviceId);
+      info.speed = await readUsbNegotiatedSpeed(info.vendorId, info.productId, true, physicalIdentity);
     }
     if (info.speed === 0) {
       throw new UsbBackendError('无法读取实际 USB 速率；请完成系统 USB 授权后重新共享。设备传输仍使用 DDK。', -95);

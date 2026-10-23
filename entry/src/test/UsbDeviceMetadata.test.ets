@@ -36,6 +36,9 @@ export default function UsbDeviceMetadataTest() {
         0x1a86, 0x7523, 'USB&BUS_03&DEV_13&PID_7523&VID_1A86&CLASS_FF', [first, second]);
       expect(selected?.productName).assertEqual('Adapter B');
       expect(selected?.serialNumber).assertEqual('B-2');
+      const byAddress: UsbManagerDeviceMetadata | undefined = selectUsbManagerMetadata(
+        0x1a86, 0x7523, 'USB2.0-Serial', [first, second], { busNum: 3, devAddress: 19 });
+      expect(byAddress?.productName).assertEqual('Adapter B');
     });
 
     it('uses VID/PID only for a unique candidate and rejects ambiguous mappings', 0, () => {

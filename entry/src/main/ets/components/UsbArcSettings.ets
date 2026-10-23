@@ -521,7 +521,7 @@ export struct UsbArcSettings {
           PreferenceSwitchRow({
             title: '强制接管 USB 接口',
             description: this.settings.backendMode === 'usbDdk' ?
-              'USB DDK 不支持强制接管；切换到 DDK 时已关闭此选项。' :
+              'DDK 接口占用由系统管理，此开关仅用于 USBManager。' :
               '默认关闭。开启后USBArc会请求强制占用接口，可能影响本机正在使用该设备的软件。',
             checked: this.settings.forceClaim,
             pending: this.isPreferencePending('forceClaim'),

@@ -93,9 +93,11 @@ export function selectUsbManagerMetadata(
   vendorId: number,
   productId: number,
   description: string,
-  candidates: ReadonlyArray<UsbManagerDeviceMetadata>
+  candidates: ReadonlyArray<UsbManagerDeviceMetadata>,
+  physicalIdentity?: UsbPhysicalAddress
 ): UsbManagerDeviceMetadata | undefined {
-  const location: UsbPhysicalAddress | undefined = parseDdkUsbPhysicalAddress(description, vendorId, productId);
+  const location: UsbPhysicalAddress | undefined = physicalIdentity ??
+    parseDdkUsbPhysicalAddress(description, vendorId, productId);
   const matches: Array<UsbManagerDeviceMetadata> = candidates.filter(
     (candidate: UsbManagerDeviceMetadata): boolean => candidate.vendorId === vendorId && candidate.productId === productId);
   if (location !== undefined) {

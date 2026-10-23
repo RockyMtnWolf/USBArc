@@ -54,9 +54,9 @@ export interface UsbDeviceInfo {
   deviceSubClass: number;
   deviceProtocol: number;
   configurations: Array<UsbConfigurationInfo>;
-  /** DDK DeviceManager ID. Undefined for usbManager devices. */
+  /** DDK physical ID encoded from USBManager bus and device address. */
   backendDeviceId?: number;
-  /** Opaque ID returned by OH_Usb_GetDevices. Undefined for usbManager devices. */
+  /** Decimal uint64 DDK device ID used for descriptor and transfer calls. */
   opaqueDeviceId?: string;
   /** True only after the selected backend confirms access (manager right or initialized DDK binding). */
   authorized: boolean;
